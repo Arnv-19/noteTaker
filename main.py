@@ -513,8 +513,50 @@ class MainWindow(QMainWindow):
     def toggle_save_pdf_mode(self, checked):
         self.save_to_pdf_mode = checked
         self.save_settings()
-        if checked and self.doc:
-            self.save_pdf_highlights()
+        if checked and self.doc is not None and not getattr(self.doc, 'is_closed', False):
+            # Backfill: write any highlights made while the toggle was OFF into the PDF
+            self.sync_highlights_to_pdf()
+
+    def sync_highlights_to_pdf(self):
+        """Add a PDF highlight annot for every tree node's rects that isn't already in the PDF."""
+        if self.doc is None or getattr(self.doc, 'is_closed', False):
+            return
+
+        def walk(nodes):
+            for n in nodes:
+                yield n
+                yield from walk(n.get("children", []))
+
+        changed = False
+        for n in walk(self.annotations):
+            page_idx = n.get("page", 1) - 1
+            rects = [fitz.Rect(r) for r in n.get("fitz_rects", []) if len(r) == 4]
+            if not rects or page_idx < 0 or page_idx >= len(self.doc):
+                continue
+            page = self.doc[page_idx]
+            try:
+                existing = [a.rect for a in page.annots() if a.type[0] == 8]
+            except Exception:
+                existing = []
+            for r in rects:
+                already = any(self._rects_match(er, r) for er in existing)
+                if not already:
+                    annot = page.add_highlight_annot(r)
+                    if annot:
+                        annot.update()
+                        changed = True
+        if changed:
+            self._do_save_pdf()
+            self.show_page()
+
+    @staticmethod
+    def _rects_match(a, b, threshold=0.5):
+        """True if two rects overlap significantly (avoids matching mere neighbors)."""
+        inter = fitz.Rect(a) & fitz.Rect(b)
+        if inter.is_empty:
+            return False
+        min_area = min(abs(fitz.Rect(a)), abs(fitz.Rect(b)))
+        return min_area > 0 and abs(inter) > threshold * min_area
 
     # ── Recent Files ─────────────────────────────────────────────────────────
     def add_to_recent(self, path):
@@ -1237,10 +1279,11 @@ class MainWindow(QMainWindow):
             if self.current_h3 and id(self.current_h3) not in active: self.current_h3 = None
             if self.current_h4 and id(self.current_h4) not in active: self.current_h4 = None
             
-            if self.save_to_pdf_mode and self.doc is not None and not getattr(self.doc, 'is_closed', False):
+            if self.doc is not None and not getattr(self.doc, 'is_closed', False):
+                # Always clean up matching PDF annots (no-op if none were ever saved),
+                # and persist immediately so the deletion sticks even with toggle OFF
                 self.remove_pdf_highlights(node_to_delete)
-            # Defer the save to prevent blocking the UI
-            self.save_pdf_highlights()
+                self._do_save_pdf(force=True)
             self.render_tree()
             self.show_page()
             self.export_markdown()
@@ -1283,7 +1326,7 @@ class MainWindow(QMainWindow):
                             continue
                         ar = annot.rect
                         for tr in target_rects:
-                            if ar.intersects(tr):
+                            if self._rects_match(ar, tr):
                                 page.delete_annot(annot)
                                 keep_going = True
                                 break
@@ -1365,9 +1408,12 @@ class MainWindow(QMainWindow):
         # Restart the timer (debounce: saves 2s after last change)
         self._save_timer.start()
 
-    def _do_save_pdf(self):
-        """Actually perform the PDF save (called by timer or directly after deletion)."""
-        if self.doc is None or getattr(self.doc, 'is_closed', False) or not self.save_to_pdf_mode:
+    def _do_save_pdf(self, force=False):
+        """Actually perform the PDF save (called by timer or directly after deletion).
+        force=True bypasses the save_to_pdf_mode gate (used for deletions)."""
+        if self.doc is None or getattr(self.doc, 'is_closed', False):
+            return
+        if not self.save_to_pdf_mode and not force:
             return
         try:
             self.doc.saveIncr()
