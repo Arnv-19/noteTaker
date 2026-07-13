@@ -955,6 +955,15 @@ class MainWindow(QMainWindow):
         else:
             window = [self.current_page_idx]
 
+        # One-time migration: blank any legacy embedded sketch images and
+        # clear their img_xref so they become overlay-only (like text stickies)
+        visible_set = set(window)
+        for n in N.walk(self.annotations):
+            if n.get("role") == "sketch_sticky" and n.get("img_xref") \
+                    and (n.get("page", 1) - 1) in visible_set:
+                self.pdf.blank_image(n.get("page", 1) - 1, n["img_xref"])
+                n.pop("img_xref", None)
+
         # Render pixmaps (annots=False to avoid PyMuPDF crashes on malformed annots)
         pixes = []
         for p_idx in window:
@@ -1020,12 +1029,9 @@ class MainWindow(QMainWindow):
                                 w_px = int((rc[2]-rc[0])*zf)
                                 h_px = int((rc[3]-rc[1])*zf)
                                 if n.get("collapsed", True):
-                                    # Cover the embedded PDF image with white so
-                                    # it doesn't bleed through the collapsed icon
-                                    painter.setBrush(QColor(255, 255, 255))
-                                    painter.setPen(Qt.PenStyle.NoPen)
-                                    painter.drawRect(int(x), int(y), max(w_px, 22), max(h_px, 22))
-                                    # Draw collapsed icon
+                                    # Collapsed: just draw the small icon (the PDF
+                                    # image is blanked when collapsing so nothing
+                                    # bleeds through — no white cover rect needed)
                                     painter.setBrush(QColor(255, 214, 120, 240))
                                     painter.setPen(QPen(QColor(150, 110, 0), 1))
                                     painter.drawRoundedRect(int(x), int(y), 20, 20, 4, 4)
@@ -1036,21 +1042,20 @@ class MainWindow(QMainWindow):
                                 else:
                                     x, y = int(x), int(y)
                                     locked = n.get("locked", False)
-                                    # The PDF image already shows the sketch;
-                                    # just draw the border on top
+                                    # Draw border
                                     painter.setBrush(Qt.BrushStyle.NoBrush)
                                     painter.setPen(QPen(QColor(220, 60, 60) if locked else QColor(150, 110, 0),
                                                         2 if locked else 1))
                                     painter.drawRoundedRect(x-3, y-3, w_px+6, h_px+6, 5, 5)
                                     painter.setPen(Qt.PenStyle.NoPen)
-                                    # If no PDF image (save-to-pdf off), draw from cache
-                                    if not n.get("img_xref"):
-                                        cached = self._sketch_pixmap(n.get("img_path"))
-                                        if cached and not cached.isNull():
-                                            scaled = cached.scaled(max(1,w_px), max(1,h_px),
-                                                                   Qt.AspectRatioMode.KeepAspectRatio,
-                                                                   Qt.TransformationMode.SmoothTransformation)
-                                            painter.drawPixmap(x, y, scaled)
+                                    # Always draw from cache (the PDF Do command
+                                    # is removed when collapsed and may not exist)
+                                    cached = self._sketch_pixmap(n.get("img_path"))
+                                    if cached and not cached.isNull():
+                                        scaled = cached.scaled(max(1,w_px), max(1,h_px),
+                                                               Qt.AspectRatioMode.KeepAspectRatio,
+                                                               Qt.TransformationMode.SmoothTransformation)
+                                        painter.drawPixmap(x, y, scaled)
                         elif n.get("sticky"):
                             for rc in n.get("fitz_rects", []):
                                 if len(rc) != 4:
@@ -1312,12 +1317,12 @@ class MainWindow(QMainWindow):
         if self.doc is None or getattr(self.doc, 'is_closed', False):
             return
         menu = QMenu(self)
-        menu.addAction("📌 Add Sticky Note Here", lambda: self.add_sticky_note(pos))
-        menu.addAction("🖌 Add Sketch Sticky Here", lambda: self.add_sketch_sticky(pos))
+        menu.addAction("📌 Add Sticky Note Here", lambda checked=False, p=pos: self.add_sticky_note(p))
+        menu.addAction("🖌 Add Sketch Sticky Here", lambda checked=False, p=pos: self.add_sketch_sticky(p))
         if self.current_selection_text:
             menu.addSeparator()
-            menu.addAction("✨ Highlight Selection", lambda: self.add_annotation("highlight"))
-            menu.addAction("📝 Note from Selection", lambda: self.add_annotation("custom_note"))
+            menu.addAction("✨ Highlight Selection", lambda checked=False: self.add_annotation("highlight"))
+            menu.addAction("📝 Note from Selection", lambda checked=False: self.add_annotation("custom_note"))
         menu.exec(self.viewer.mapToGlobal(pos))
 
     def add_sticky_note(self, pos):
@@ -1384,11 +1389,10 @@ class MainWindow(QMainWindow):
         ph = min(img.height(), 260) / zf
         area_rect = fitz.Rect(fx, fy, fx + pw, fy + ph)
 
-        img_xref = self.pdf.embed_image(page_idx, area_rect, filepath)
+        # Sketch stickies are overlay-only (like text stickies) — no PDF embedding.
+        # The image file on disk is drawn by the overlay when expanded.
         node = N.sketch_node(filename, filepath, page_idx + 1, area_rect,
                              self.sketch_default_collapsed)
-        if img_xref:
-            node["img_xref"] = img_xref
         parent = self.current_h4 or self.current_h3 or self.current_h2 or self.current_h1
         (parent["children"] if parent else self.annotations).append(node)
         self.render_tree()
@@ -1868,7 +1872,7 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
 
         edit_action = QAction("✏ Edit", self)
-        edit_action.triggered.connect(lambda: self.edit_annotation(item))
+        edit_action.triggered.connect(lambda checked=False, it=item: self.edit_annotation(it))
         menu.addAction(edit_action)
 
         # Color submenu for highlight/note nodes
@@ -1876,22 +1880,22 @@ class MainWindow(QMainWindow):
             color_menu = menu.addMenu("🎨 Color")
             for cname in HIGHLIGHT_COLORS:
                 act = color_menu.addAction(self._color_icon(cname), cname)
-                act.triggered.connect(lambda checked, c=cname: self.change_annotation_color(item, c))
+                act.triggered.connect(lambda checked=False, c=cname, it=item: self.change_annotation_color(it, c))
 
         # Sketch sticky actions
         if node and node.get("role") == "sketch_sticky":
             collapse_lbl = "🔽 Expand" if node.get("collapsed", True) else "🔼 Collapse"
             a1 = menu.addAction(collapse_lbl)
-            a1.triggered.connect(lambda: self._tree_toggle_sketch(node))
+            a1.triggered.connect(lambda checked=False, n=node: self._tree_toggle_sketch(n))
             lock_lbl = "🔓 Unlock Position" if node.get("locked") else "🔒 Lock Position"
             a2 = menu.addAction(lock_lbl)
-            a2.triggered.connect(lambda: self._tree_toggle_lock(node))
+            a2.triggered.connect(lambda checked=False, n=node: self._tree_toggle_lock(n))
             a3 = menu.addAction("✏ Re-draw")
-            a3.triggered.connect(lambda: self.redraw_sketch(node))
+            a3.triggered.connect(lambda checked=False, n=node: self.redraw_sketch(n))
 
         menu.addSeparator()
         delete_action = QAction("🗑 Delete", self)
-        delete_action.triggered.connect(lambda: self.delete_annotation(item))
+        delete_action.triggered.connect(lambda checked=False, it=item: self.delete_annotation(it))
         menu.addAction(delete_action)
         menu.exec(self.tree_widget.mapToGlobal(pos))
 

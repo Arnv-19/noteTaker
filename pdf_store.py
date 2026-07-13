@@ -242,15 +242,35 @@ class PdfStore(QObject):
             return False
 
     def blank_image(self, page_idx, img_xref):
-        """Replace a sketch image with a 1×1 white pixel (visually erases it
-        without touching page text — redaction would wipe content underneath)."""
+        """Remove the sketch image's drawing command from the page content
+        stream so it becomes truly invisible.  Neither white-pixel nor
+        transparent-pixel replacement works reliably (white → visible box,
+        transparent → black box because the renderer ignores alpha).
+        Removing the ``Do`` operator is safe: the surrounding q/Q pair
+        becomes a harmless no-op and page text is never touched."""
         if not self.valid or not img_xref:
             return False
         try:
             page = self.doc[page_idx]
-            blank = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 1, 1), False)
-            blank.clear_with(255)
-            page.replace_image(img_xref, pixmap=blank)
+
+            # Find the resource name the page uses for this image xref
+            img_name = None
+            for info in page.get_images(full=True):
+                if info[0] == img_xref:
+                    img_name = info[7]   # e.g. "Im0"
+                    break
+            if not img_name:
+                return False
+
+            # Consolidate content streams, then strip the Do command
+            page.clean_contents()
+            for c_xref in page.get_contents():
+                stream = self.doc.xref_stream(c_xref)
+                target = f"/{img_name} Do".encode()
+                if target in stream:
+                    stream = stream.replace(target, b"")
+                    self.doc.update_stream(c_xref, stream)
+
             self.save_now(force=True)
             return True
         except Exception as e:
@@ -267,9 +287,8 @@ class PdfStore(QObject):
             if page_idx < 0 or page_idx >= len(self.doc):
                 continue
 
-            # Sketch stickies embed a real image — blank it using its stored xref.
-            # blank_image replaces it with a 1×1 white pixel which is visually
-            # invisible but preserves page text (unlike redaction which wipes content).
+            # Legacy sketch stickies may have an embedded image — remove its
+            # Do command from the content stream.  New sketches are overlay-only.
             if n.get("role") == "sketch_sticky":
                 img_xref = n.get("img_xref")
                 page_idx = n.get("page", 1) - 1
