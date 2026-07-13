@@ -1,6 +1,18 @@
+"""PDF Annotator — main window and application entry point.
+
+Architecture:
+    theme.py      themes, color palettes, global stylesheet
+    widgets.py    small reusable widgets (ToggleSwitch)
+    viewer.py     the PDF page viewer (selection, ink strokes, sketch clicks)
+    sketch.py     the Sketch Sticky drawing canvas dialog
+    nodes.py      annotation node schema, factories, tree helpers
+    pdf_store.py  ALL PDF I/O: open/repair, saves, annot writes/removal/sync
+    main.py       MainWindow: UI wiring, annotation tree, tabs, exports
+"""
 import sys
 import os
 import json
+import csv
 import fitz  # PyMuPDF
 import traceback
 from datetime import datetime
@@ -8,542 +20,42 @@ from datetime import datetime
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QFileDialog, QTreeWidget, QTreeWidgetItem,
-    QLabel, QScrollArea, QSplitter, QRubberBand, QToolBar, QInputDialog,
-    QMessageBox, QLineEdit, QMenu, QDialog, QGridLayout, QComboBox, QTabWidget, QCheckBox, QKeySequenceEdit,
-    QWidgetAction, QSizePolicy, QAbstractItemView, QTabBar
+    QLabel, QScrollArea, QSplitter, QToolBar, QInputDialog,
+    QMessageBox, QLineEdit, QMenu, QDialog, QGridLayout, QComboBox,
+    QTabWidget, QCheckBox, QKeySequenceEdit, QWidgetAction, QSizePolicy,
+    QAbstractItemView, QTabBar
 )
-from PyQt6.QtCore import Qt, QRect, QPoint, QSize, pyqtProperty, QPropertyAnimation, QTimer
-from PyQt6.QtGui import QPixmap, QImage, QAction, QKeySequence, QShortcut, QColor, QPainter, QPen, QTextDocument, QPdfWriter, QIcon
+from PyQt6.QtCore import Qt, QRect, QPoint, QSize, QTimer
+from PyQt6.QtGui import (QPixmap, QImage, QAction, QKeySequence, QShortcut,
+                         QColor, QPainter, QPen, QTextDocument, QPdfWriter, QIcon)
 
-# ── Toggle Switch Custom Widget ──────────────────────────────────────────────
-class ToggleSwitch(QCheckBox):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setFixedSize(40, 22)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._position = 0
-        self.animation = QPropertyAnimation(self, b"position")
-        self.animation.setDuration(150)
-        self.stateChanged.connect(self.setup_animation)
-
-    @pyqtProperty(float)
-    def position(self):
-        return self._position
-
-    @position.setter
-    def position(self, pos):
-        self._position = pos
-        self.update()
-
-    def setup_animation(self, value):
-        self.animation.stop()
-        if value:
-            self.animation.setEndValue(1.0)
-        else:
-            self.animation.setEndValue(0.0)
-        self.animation.start()
-
-    def hitButton(self, pos: QPoint):
-        return self.contentsRect().contains(pos)
-
-    def paintEvent(self, e):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setPen(Qt.PenStyle.NoPen)
-
-        rect = QRect(0, 0, self.width(), self.height())
-        
-        if not self.isChecked():
-            p.setBrush(QColor("#777777"))
-            p.drawRoundedRect(0, 0, rect.width(), self.height(), int(self.height() / 2), int(self.height() / 2))
-        else:
-            p.setBrush(QColor("#4cd964"))
-            p.drawRoundedRect(0, 0, rect.width(), self.height(), int(self.height() / 2), int(self.height() / 2))
-            
-        p.setBrush(QColor("#ffffff"))
-        x = self._position * (self.width() - self.height())
-        p.drawEllipse(int(x) + 2, 2, self.height() - 4, self.height() - 4)
-        p.end()
-
-# ── Theme Definitions ────────────────────────────────────────────────────────
-THEMES = {
-    "Dark Black": {
-        "window": (26, 27, 38), "window_text": (192, 202, 245),
-        "base": (36, 40, 59), "alt_base": (26, 27, 38),
-        "text": (192, 202, 245), "button": (36, 40, 59),
-        "button_text": (192, 202, 245), "bright": (247, 118, 142),
-        "highlight": (122, 162, 247), "highlight_text": (26, 27, 38),
-    },
-    "AMOLED": {
-        "window": (0, 0, 0), "window_text": (222, 222, 222),
-        "base": (10, 10, 10), "alt_base": (0, 0, 0),
-        "text": (222, 222, 222), "button": (16, 16, 16),
-        "button_text": (222, 222, 222), "bright": (255, 122, 122),
-        "highlight": (80, 140, 255), "highlight_text": (0, 0, 0),
-    },
-    "Blue": {
-        "window": (17, 24, 39), "window_text": (187, 210, 245),
-        "base": (24, 34, 56), "alt_base": (17, 24, 39),
-        "text": (187, 210, 245), "button": (24, 34, 56),
-        "button_text": (187, 210, 245), "bright": (96, 165, 250),
-        "highlight": (59, 130, 246), "highlight_text": (255, 255, 255),
-    },
-    "Purple": {
-        "window": (30, 20, 44), "window_text": (220, 200, 245),
-        "base": (42, 28, 62), "alt_base": (30, 20, 44),
-        "text": (220, 200, 245), "button": (42, 28, 62),
-        "button_text": (220, 200, 245), "bright": (192, 132, 252),
-        "highlight": (147, 51, 234), "highlight_text": (255, 255, 255),
-    },
-    "Sepia": {
-        "window": (62, 49, 37), "window_text": (230, 213, 189),
-        "base": (75, 60, 45), "alt_base": (62, 49, 37),
-        "text": (230, 213, 189), "button": (75, 60, 45),
-        "button_text": (230, 213, 189), "bright": (217, 119, 6),
-        "highlight": (180, 120, 60), "highlight_text": (255, 255, 255),
-    },
-}
-
-def apply_theme(app, theme_name):
-    t = THEMES.get(theme_name, THEMES["Dark Black"])
-    palette = app.palette()
-    palette.setColor(palette.ColorRole.Window, QColor(*t["window"]))
-    palette.setColor(palette.ColorRole.WindowText, QColor(*t["window_text"]))
-    palette.setColor(palette.ColorRole.Base, QColor(*t["base"]))
-    palette.setColor(palette.ColorRole.AlternateBase, QColor(*t["alt_base"]))
-    palette.setColor(palette.ColorRole.ToolTipBase, QColor(*t["window_text"]))
-    palette.setColor(palette.ColorRole.ToolTipText, QColor(*t["window_text"]))
-    palette.setColor(palette.ColorRole.Text, QColor(*t["text"]))
-    palette.setColor(palette.ColorRole.Button, QColor(*t["button"]))
-    palette.setColor(palette.ColorRole.ButtonText, QColor(*t["button_text"]))
-    palette.setColor(palette.ColorRole.BrightText, QColor(*t["bright"]))
-    palette.setColor(palette.ColorRole.Highlight, QColor(*t["highlight"]))
-    palette.setColor(palette.ColorRole.HighlightedText, QColor(*t["highlight_text"]))
-    app.setPalette(palette)
-
-    # Global stylesheet: flat, minimal, consistent spacing
-    win = "rgb(%d,%d,%d)" % t["window"]
-    base = "rgb(%d,%d,%d)" % t["base"]
-    btn = "rgb(%d,%d,%d)" % t["button"]
-    txt = "rgb(%d,%d,%d)" % t["text"]
-    hl = "rgb(%d,%d,%d)" % t["highlight"]
-    border = "rgba(%d,%d,%d,60)" % t["text"]
-    app.setStyleSheet(f"""
-        QToolBar {{
-            background: {win};
-            border: none;
-            border-bottom: 1px solid {border};
-            padding: 4px 6px;
-            spacing: 4px;
-        }}
-        QToolBar QToolButton, QToolBar QPushButton {{
-            background: transparent;
-            color: {txt};
-            border: none;
-            border-radius: 6px;
-            padding: 5px 10px;
-        }}
-        QToolBar QToolButton:hover, QToolBar QPushButton:hover {{
-            background: {base};
-        }}
-        QToolBar QToolButton:checked {{
-            background: {hl};
-            color: {win};
-        }}
-        QToolBar::separator {{
-            background: {border};
-            width: 1px;
-            margin: 6px 6px;
-        }}
-        QLineEdit {{
-            background: {base};
-            color: {txt};
-            border: 1px solid {border};
-            border-radius: 6px;
-            padding: 4px 8px;
-            selection-background-color: {hl};
-        }}
-        QComboBox {{
-            background: {base};
-            color: {txt};
-            border: 1px solid {border};
-            border-radius: 6px;
-            padding: 4px 8px;
-        }}
-        QComboBox::drop-down {{ border: none; width: 18px; }}
-        QTreeWidget {{
-            background: {base};
-            color: {txt};
-            border: none;
-            border-radius: 6px;
-            padding: 4px;
-        }}
-        QTreeWidget::item {{ padding: 3px 2px; border-radius: 4px; }}
-        QTreeWidget::item:selected {{ background: {hl}; color: {win}; }}
-        QTabWidget::pane {{ border: none; background: {win}; }}
-        QTabBar::tab {{
-            background: transparent;
-            color: {txt};
-            padding: 7px 16px;
-            border: none;
-            border-bottom: 2px solid transparent;
-        }}
-        QTabBar::tab:selected {{
-            color: {hl};
-            border-bottom: 2px solid {hl};
-        }}
-        QStatusBar {{
-            background: {win};
-            color: {txt};
-            border-top: 1px solid {border};
-        }}
-        QMenu {{
-            background: {base};
-            color: {txt};
-            border: 1px solid {border};
-            border-radius: 6px;
-            padding: 4px;
-        }}
-        QMenu::item {{ padding: 6px 24px 6px 12px; border-radius: 4px; }}
-        QMenu::item:selected {{ background: {hl}; color: {win}; }}
-        QScrollArea {{ border: none; }}
-        QScrollBar:vertical {{ background: transparent; width: 10px; margin: 0; }}
-        QScrollBar::handle:vertical {{ background: {border}; border-radius: 5px; min-height: 30px; }}
-        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
-        QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 0; }}
-        QScrollBar::handle:horizontal {{ background: {border}; border-radius: 5px; min-width: 30px; }}
-        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
-    """)
-
-
-# ── Highlight Colors ─────────────────────────────────────────────────────────
-HIGHLIGHT_COLORS = {
-    "Yellow": (1.0, 0.92, 0.23),
-    "Green":  (0.40, 0.85, 0.42),
-    "Pink":   (0.96, 0.45, 0.71),
-    "Blue":   (0.38, 0.65, 0.98),
-    "Orange": (1.0, 0.62, 0.26),
-}
-
-def hl_qcolor(name, alpha=100):
-    r, g, b = HIGHLIGHT_COLORS.get(name, HIGHLIGHT_COLORS["Yellow"])
-    return QColor(int(r*255), int(g*255), int(b*255), alpha)
-
-# ── Pen (ink) Colors ─────────────────────────────────────────────────────────
-PEN_COLORS = {
-    "Red":   (0.90, 0.13, 0.13),
-    "Black": (0.05, 0.05, 0.05),
-    "Blue":  (0.15, 0.39, 0.92),
-    "Green": (0.13, 0.63, 0.30),
-    "White": (0.98, 0.98, 0.98),
-}
-
-def pen_qcolor(name, alpha=255):
-    r, g, b = PEN_COLORS.get(name, PEN_COLORS["Red"])
-    return QColor(int(r*255), int(g*255), int(b*255), alpha)
-
-
-class PDFViewer(QLabel):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        self.start_point = QPoint()
-        self.end_point = QPoint()
-        self.selected_rects = []
-        self.search_rects = []
-        self.main_window = None
-        self.screenshot_mode = False
-        self.eraser_mode = False
-        self._dbl_click_time = 0
-        self.draw_mode = False
-        self._current_stroke = []   # live points [(x,y),...] in viewer pixels
-        self.pen_color = QColor(255, 0, 0)
-        self.pen_width = 3
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and self.draw_mode:
-            self._current_stroke = [(event.pos().x(), event.pos().y())]
-            self.update()
-            return
-        if event.button() == Qt.MouseButton.LeftButton:
-            # A click on a sketch sticky toggles it (open/collapse) instead of selecting
-            if self.main_window and self.main_window.handle_sketch_click(event.pos()):
-                return
-            # Triple-click: a press arriving right after a double-click
-            if self.main_window and self._dbl_click_time and \
-               (event.timestamp() - self._dbl_click_time) < 450:
-                self._dbl_click_time = 0
-                self.main_window.select_block_at(event.pos())
-                return
-            if not (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
-                if self.main_window:
-                    self.main_window.clear_accumulated_selection()
-                self.selected_rects = []
-            self.start_point = event.pos()
-            self.end_point = event.pos()
-            if self.main_window:
-                self.main_window.begin_selection(event.pos())
-            self.update()
-        elif event.button() == Qt.MouseButton.RightButton:
-            if self.main_window:
-                self.main_window.show_viewer_context_menu(event.pos())
-
-    def mouseDoubleClickEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and self.main_window:
-            self._dbl_click_time = event.timestamp()
-            self.main_window.select_word_at(event.pos())
-
-    def mouseMoveEvent(self, event):
-        if self.draw_mode:
-            if self._current_stroke:
-                self._current_stroke.append((event.pos().x(), event.pos().y()))
-                self.update()
-            return
-        if not self.start_point.isNull():
-            self.end_point = event.pos()
-            if self.main_window:
-                if self.screenshot_mode:
-                    # Show rectangle for screenshot
-                    rect = QRect(self.start_point, self.end_point).normalized()
-                    self.selected_rects = [rect]
-                    self.update()
-                else:
-                    self.main_window.update_selection_overlay()
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and self.draw_mode:
-            if self._current_stroke and len(self._current_stroke) > 1 and self.main_window:
-                self.main_window.commit_ink_stroke(self._current_stroke)
-            self._current_stroke = []
-            self.update()
-            return
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.end_point = event.pos()
-            if self.main_window:
-                if self.screenshot_mode:
-                    self.main_window.capture_screenshot(self.start_point, self.end_point)
-                    self.screenshot_mode = False
-                else:
-                    append = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
-                    self.main_window.handle_selection(append=append)
-
-    def clear_selection(self):
-        self.start_point = QPoint()
-        self.end_point = QPoint()
-        self.selected_rects = []
-        self.screenshot_mode = False
-        self._current_stroke = []
-        self.update()
-
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        painter = QPainter(self)
-        
-        # Draw search results (Green)
-        if hasattr(self, 'search_rects') and self.search_rects:
-            painter.setBrush(QColor(0, 255, 0, 80))
-            painter.setPen(Qt.PenStyle.NoPen)
-            for rect in self.search_rects:
-                painter.drawRect(rect)
-                
-        # Draw selections (Yellow)
-        if self.selected_rects:
-            if self.screenshot_mode:
-                painter.setBrush(QColor(0, 120, 255, 60))
-                painter.setPen(QPen(QColor(0, 120, 255), 2))
-            else:
-                painter.setBrush(QColor(255, 255, 0, 100))
-                painter.setPen(Qt.PenStyle.NoPen)
-            for rect in self.selected_rects:
-                painter.drawRect(rect)
-
-        # Live ink stroke preview
-        if self._current_stroke and len(self._current_stroke) > 1:
-            pen = QPen(self.pen_color, self.pen_width)
-            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-            painter.setPen(pen)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            for i in range(1, len(self._current_stroke)):
-                x0, y0 = self._current_stroke[i-1]
-                x1, y1 = self._current_stroke[i]
-                painter.drawLine(int(x0), int(y0), int(x1), int(y1))
-
-        painter.end()
-
-
-class SketchCanvasDialog(QDialog):
-    """A resizable drawing surface: pen + pixel eraser. Returns a QImage on save."""
-    def __init__(self, parent=None, existing_image=None, init_w=420, init_h=320,
-                 pen_color=None, pen_width=3):
-        super().__init__(parent)
-        self.setWindowTitle("🖌 Sketch Sticky")
-        self.setMinimumSize(220, 180)
-        self.resize(init_w, init_h)
-
-        self.pen_color = pen_color or QColor(20, 20, 20)
-        self.pen_width = pen_width
-        self.eraser_mode = False
-        self.eraser_width = 18
-        self._last = None
-        self.result_image = None
-
-        # The canvas image (transparent so the page shows through when stamped)
-        self._canvas = QImage(init_w, init_h - 44, QImage.Format.Format_ARGB32)
-        self._canvas.fill(Qt.GlobalColor.transparent)
-        if existing_image is not None and not existing_image.isNull():
-            p = QPainter(self._canvas)
-            p.drawImage(0, 0, existing_image.scaled(
-                self._canvas.size(), Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation))
-            p.end()
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(6)
-
-        # Toolbar row
-        bar = QHBoxLayout()
-        self.pen_btn = QPushButton("✏ Pen"); self.pen_btn.setCheckable(True); self.pen_btn.setChecked(True)
-        self.eraser_btn = QPushButton("🧽 Eraser"); self.eraser_btn.setCheckable(True)
-        self.pen_btn.clicked.connect(lambda: self._set_eraser(False))
-        self.eraser_btn.clicked.connect(lambda: self._set_eraser(True))
-        bar.addWidget(self.pen_btn); bar.addWidget(self.eraser_btn)
-
-        color_btn = QPushButton("🎨")
-        color_btn.setToolTip("Pen color")
-        color_menu = QMenu(self)
-        for cname in PEN_COLORS:
-            act = color_menu.addAction(cname)
-            act.triggered.connect(lambda checked, c=cname: self._set_color(c))
-        color_btn.setMenu(color_menu)
-        bar.addWidget(color_btn)
-
-        self.width_combo = QComboBox()
-        for wl, wv in [("1", 1), ("2", 2), ("3", 3), ("5", 5), ("8", 8)]:
-            self.width_combo.addItem(wl, wv)
-        self.width_combo.setCurrentText(str(pen_width))
-        self.width_combo.setFixedWidth(52)
-        self.width_combo.currentIndexChanged.connect(
-            lambda: setattr(self, "pen_width", self.width_combo.currentData()))
-        bar.addWidget(QLabel("W:")); bar.addWidget(self.width_combo)
-
-        clear_btn = QPushButton("Clear")
-        clear_btn.clicked.connect(self._clear)
-        bar.addWidget(clear_btn)
-        bar.addStretch()
-        layout.addLayout(bar)
-
-        # Drawing area label (the canvas is painted in paintEvent of an inner widget)
-        self.surface = _SketchSurface(self)
-        layout.addWidget(self.surface, 1)
-
-        # Save / Cancel
-        btns = QHBoxLayout()
-        btns.addStretch()
-        save_btn = QPushButton("Save"); cancel_btn = QPushButton("Cancel")
-        save_btn.clicked.connect(self._on_save); cancel_btn.clicked.connect(self.reject)
-        btns.addWidget(save_btn); btns.addWidget(cancel_btn)
-        layout.addLayout(btns)
-
-    def _set_eraser(self, on):
-        self.eraser_mode = on
-        self.pen_btn.setChecked(not on); self.eraser_btn.setChecked(on)
-
-    def _set_color(self, cname):
-        self.pen_color = pen_qcolor(cname)
-        self._set_eraser(False)
-
-    def _clear(self):
-        self._canvas.fill(Qt.GlobalColor.transparent)
-        self.surface.update()
-
-    def _ensure_canvas_size(self, w, h):
-        if w <= self._canvas.width() and h <= self._canvas.height():
-            return
-        bigger = QImage(max(w, self._canvas.width()), max(h, self._canvas.height()),
-                        QImage.Format.Format_ARGB32)
-        bigger.fill(Qt.GlobalColor.transparent)
-        p = QPainter(bigger); p.drawImage(0, 0, self._canvas); p.end()
-        self._canvas = bigger
-
-    def draw_to(self, pt):
-        self._ensure_canvas_size(pt.x() + 2, pt.y() + 2)
-        painter = QPainter(self._canvas)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        if self.eraser_mode:
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
-            pen = QPen(Qt.GlobalColor.transparent, self.eraser_width)
-        else:
-            pen = QPen(self.pen_color, self.pen_width)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        if self._last is not None:
-            painter.drawLine(self._last, pt)
-        else:
-            painter.drawPoint(pt)
-        painter.end()
-        self._last = pt
-        self.surface.update()
-
-    def end_stroke(self):
-        self._last = None
-
-    def _content_bounds(self):
-        """Tight bounding box of non-transparent pixels; None if empty."""
-        w, h = self._canvas.width(), self._canvas.height()
-        minx, miny, maxx, maxy = w, h, 0, 0
-        found = False
-        for y in range(0, h, 2):
-            for x in range(0, w, 2):
-                if (self._canvas.pixel(x, y) >> 24) & 0xFF:
-                    found = True
-                    minx = min(minx, x); miny = min(miny, y)
-                    maxx = max(maxx, x); maxy = max(maxy, y)
-        if not found:
-            return None
-        pad = 6
-        return QRect(max(0, minx - pad), max(0, miny - pad),
-                     min(w, maxx + pad) - max(0, minx - pad),
-                     min(h, maxy + pad) - max(0, miny - pad))
-
-    def _on_save(self):
-        bounds = self._content_bounds()
-        if bounds is None:
-            self.reject()
-            return
-        self.result_image = self._canvas.copy(bounds)
-        self.accept()
-
-
-class _SketchSurface(QWidget):
-    """Inner widget that displays the dialog's canvas and forwards mouse strokes."""
-    def __init__(self, dlg):
-        super().__init__(dlg)
-        self.dlg = dlg
-        self.setStyleSheet("background: white; border: 1px solid #888;")
-        self.setCursor(Qt.CursorShape.CrossCursor)
-
-    def paintEvent(self, event):
-        p = QPainter(self)
-        p.fillRect(self.rect(), QColor(255, 255, 255))
-        p.drawImage(0, 0, self.dlg._canvas)
-        p.end()
-
-    def mousePressEvent(self, e):
-        if e.button() == Qt.MouseButton.LeftButton:
-            self.dlg.draw_to(e.pos())
-
-    def mouseMoveEvent(self, e):
-        if e.buttons() & Qt.MouseButton.LeftButton:
-            self.dlg.draw_to(e.pos())
-
-    def mouseReleaseEvent(self, e):
-        self.dlg.end_stroke()
-
+from theme import (THEMES, apply_theme, HIGHLIGHT_COLORS, PEN_COLORS,
+                   hl_qcolor, pen_qcolor)
+from widgets import ToggleSwitch
+from viewer import PDFViewer
+from sketch import SketchCanvasDialog
+from pdf_store import PdfStore, rects_match
+import nodes as N
 
 class MainWindow(QMainWindow):
+    # self.doc and self.save_to_pdf_mode proxy the PdfStore so every existing
+    # read/write site keeps working while I/O stays centralized in one class.
+    @property
+    def doc(self):
+        return self.pdf.doc
+
+    @doc.setter
+    def doc(self, value):
+        self.pdf.doc = value
+
+    @property
+    def save_to_pdf_mode(self):
+        return self.pdf.save_enabled
+
+    @save_to_pdf_mode.setter
+    def save_to_pdf_mode(self, value):
+        self.pdf.save_enabled = bool(value)
+
     SETTINGS_FILE = "annotator_settings.json"
     DEFAULT_SHORTCUTS = {
         "h1": "Alt+1",
@@ -562,11 +74,11 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
+        self.pdf = PdfStore(self, on_error=lambda m: self.statusBar().showMessage(m, 10000))
         self.setWindowTitle("PDF Annotator for Obsidian")
         self.resize(1200, 800)
 
         # State
-        self.doc = None
         self.pdf_path = ""
         self.current_page_idx = 0
         self.zoom_factor = 2.0
@@ -600,11 +112,6 @@ class MainWindow(QMainWindow):
         self.pen_width = 3
         self.sketch_default_collapsed = True                    # open tabs: path -> saved state
 
-        # Debounced PDF save timer — prevents blocking UI on every annotation
-        self._save_timer = QTimer(self)
-        self._save_timer.setSingleShot(True)
-        self._save_timer.setInterval(2000)  # Save 2 seconds after last change
-        self._save_timer.timeout.connect(self._do_save_pdf)
 
         # Heading context
         self.current_h1 = None
@@ -727,6 +234,13 @@ class MainWindow(QMainWindow):
         pen_menu.addAction("🧽 Erase Last Stroke", self.erase_last_ink)
         self.pen_opts_btn.setMenu(pen_menu)
         toolbar.addWidget(self.pen_opts_btn)
+
+        # ── Eraser tool ──
+        self.eraser_action = QAction("🧽", self)
+        self.eraser_action.setCheckable(True)
+        self.eraser_action.setToolTip("Eraser — click any pen stroke, sticky, sketch, or capture box to delete it")
+        self.eraser_action.triggered.connect(self.toggle_eraser_mode)
+        toolbar.addAction(self.eraser_action)
 
 
         # ── Save-to-PDF toggle ──
@@ -1125,22 +639,7 @@ class MainWindow(QMainWindow):
         if not node:
             return
         node["color"] = cname
-        # Update matching PDF annots
-        if self.doc is not None and not getattr(self.doc, 'is_closed', False):
-            page_idx = node.get("page", 1) - 1
-            rects = [fitz.Rect(r) for r in node.get("fitz_rects", []) if len(r) == 4]
-            if 0 <= page_idx < len(self.doc) and rects:
-                page = self.doc[page_idx]
-                try:
-                    for annot in page.annots():
-                        if annot.type[0] not in (8, 9, 10, 11):
-                            continue
-                        if any(self._rects_match(annot.rect, r) for r in rects):
-                            annot.set_colors(stroke=HIGHLIGHT_COLORS[cname])
-                            annot.update()
-                except Exception:
-                    pass
-                self._do_save_pdf(force=True)
+        self.pdf.recolor_matching(node, cname)
         self.render_tree()
         self.show_page()
         self.export_markdown()
@@ -1153,50 +652,12 @@ class MainWindow(QMainWindow):
             self.sync_highlights_to_pdf()
 
     def sync_highlights_to_pdf(self):
-        """Add a PDF highlight annot for every tree node's rects that isn't already in the PDF."""
-        if self.doc is None or getattr(self.doc, 'is_closed', False):
-            return
-
-        def walk(nodes):
-            for n in nodes:
-                yield n
-                yield from walk(n.get("children", []))
-
-        changed = False
-        for n in walk(self.annotations):
-            if n.get("sticky") or n.get("role") in ("image", "sketch_sticky", "ink"):
-                continue
-            page_idx = n.get("page", 1) - 1
-            rects = [fitz.Rect(r) for r in n.get("fitz_rects", []) if len(r) == 4]
-            if not rects or page_idx < 0 or page_idx >= len(self.doc):
-                continue
-            page = self.doc[page_idx]
-            try:
-                existing = [a.rect for a in page.annots() if a.type[0] in (8, 9, 10, 11)]
-            except Exception:
-                existing = []
-            add_annot = self._pdf_annot_method(page, n.get("style", "Highlight"))
-            for r in rects:
-                already = any(self._rects_match(er, r) for er in existing)
-                if not already:
-                    annot = add_annot(r)
-                    if annot:
-                        cname = n.get("color", "Yellow")
-                        annot.set_colors(stroke=HIGHLIGHT_COLORS.get(cname, HIGHLIGHT_COLORS["Yellow"]))
-                        annot.update()
-                        changed = True
-        if changed:
-            self._do_save_pdf()
-            self.show_page()
+        if self.pdf.sync_from_tree(self.annotations):
+            self.show_page(scroll_to_current=False)
 
     @staticmethod
     def _rects_match(a, b, threshold=0.5):
-        """True if two rects overlap significantly (avoids matching mere neighbors)."""
-        inter = fitz.Rect(a) & fitz.Rect(b)
-        if inter.is_empty:
-            return False
-        min_area = min(abs(fitz.Rect(a)), abs(fitz.Rect(b)))
-        return min_area > 0 and abs(inter) > threshold * min_area
+        return rects_match(a, b, threshold)
 
     # ── Recent Files ─────────────────────────────────────────────────────────
     def add_to_recent(self, path):
@@ -1308,18 +769,9 @@ class MainWindow(QMainWindow):
                               rect.right()/zf, (rect.bottom()-cap_off)/zf)
 
         # Optionally draw a box annotation in the PDF marking the captured area
-        if self.screenshot_box and self.save_to_pdf_mode:
-            try:
-                page = self.doc[cap_page_idx]
-                box = page.add_rect_annot(area_rect)
-                if box:
-                    cname = self._pick_color_for_role("highlight")
-                    box.set_colors(stroke=HIGHLIGHT_COLORS[cname])
-                    box.set_border(width=1.5)
-                    box.update()
-                self.save_pdf_highlights()
-            except Exception as e:
-                print(f"Area box annot failed: {e}")
+        if self.screenshot_box:
+            self.pdf.add_box(cap_page_idx, area_rect,
+                             self._pick_color_for_role("highlight"))
 
         img_dir = os.path.join(self.vault_path, "attachments")
         os.makedirs(img_dir, exist_ok=True)
@@ -1330,15 +782,8 @@ class MainWindow(QMainWindow):
         cropped.save(filepath, "PNG")
 
         # Add as annotation node (stores the area rect so it draws as a box outline)
-        node = {
-            "text": f"![[attachments/{filename}]]",
-            "custom_note": "",
-            "role": "image",
-            "children": [],
-            "page": cap_page_idx + 1,
-            "color": self._pick_color_for_role("highlight"),
-            "fitz_rects": [[area_rect.x0, area_rect.y0, area_rect.x1, area_rect.y1]]
-        }
+        node = N.image_node(filename, cap_page_idx + 1, area_rect,
+                            self._pick_color_for_role("highlight"))
         parent = self.current_h4 or self.current_h3 or self.current_h2 or self.current_h1
         if parent:
             parent["children"].append(node)
@@ -1425,26 +870,10 @@ class MainWindow(QMainWindow):
         self.save_bookmark()
         self._save_current_session()
 
-        try:
-            new_doc = fitz.open(path)
-            # If the XREF is broken, PyMuPDF might report 0 pages
-            if len(new_doc) == 0:
-                raise ValueError("0 pages found, possible XREF corruption.")
-        except Exception as e:
-            print(f"Warning: PDF might be corrupted. Attempting auto-repair... ({e})")
-            try:
-                import pikepdf
-                import shutil
-                temp_path = path + ".repaired.pdf"
-                with pikepdf.open(path) as pdf:
-                    pdf.save(temp_path)
-                shutil.move(temp_path, path)
-                new_doc = fitz.open(path)
-            except Exception as repair_e:
-                print(f"Repair failed: {repair_e}")
-                self.statusBar().showMessage(f"Failed to open or repair corrupted PDF: {path}", 5000)
-                return
-        self.doc = new_doc
+        new_doc = self.pdf.open(path)
+        if new_doc is None:
+            self.statusBar().showMessage(f"Failed to open or repair corrupted PDF: {path}", 5000)
+            return
         self.pdf_path = abs_path
         self.source_title = os.path.splitext(os.path.basename(path))[0]
         self.add_to_recent(path)
@@ -1612,16 +1041,29 @@ class MainWindow(QMainWindow):
                                                                Qt.TransformationMode.SmoothTransformation)
                                         painter.drawPixmap(x, y, scaled)
                         elif n.get("sticky"):
-                            # Sticky note pin
                             for rc in n.get("fitz_rects", []):
-                                if len(rc) == 4:
-                                    x, y = rc[0]*zf, n_off + rc[1]*zf
+                                if len(rc) != 4:
+                                    continue
+                                x, y = rc[0]*zf, n_off + rc[1]*zf
+                                if n.get("collapsed", True):
+                                    # Collapsed: small pin
                                     painter.setBrush(QColor(255, 200, 60, 230))
                                     painter.setPen(QPen(QColor(120, 90, 0), 1))
                                     painter.drawRoundedRect(int(x), int(y), 16, 16, 3, 3)
                                     painter.setPen(QPen(QColor(120, 90, 0), 2))
                                     painter.drawLine(int(x+4), int(y+6), int(x+12), int(y+6))
                                     painter.drawLine(int(x+4), int(y+10), int(x+12), int(y+10))
+                                    painter.setPen(Qt.PenStyle.NoPen)
+                                else:
+                                    # Expanded: note box with wrapped text
+                                    bw, bh = self.STICKY_NOTE_W, self.STICKY_NOTE_H
+                                    painter.setBrush(QColor(255, 249, 196, 245))
+                                    painter.setPen(QPen(QColor(150, 110, 0), 1))
+                                    painter.drawRoundedRect(int(x), int(y), bw, bh, 5, 5)
+                                    painter.setPen(QPen(QColor(60, 45, 0), 1))
+                                    painter.drawText(QRect(int(x)+8, int(y)+6, bw-16, bh-12),
+                                                     Qt.TextFlag.TextWordWrap,
+                                                     n.get("custom_note", "")[:400])
                                     painter.setPen(Qt.PenStyle.NoPen)
                         elif n.get("role") == "ink" and n.get("ink_points"):
                             pts = n["ink_points"]
@@ -1879,22 +1321,8 @@ class MainWindow(QMainWindow):
 
         cname = self.role_colors.get("sticky", "Orange") if self.auto_color else self.highlight_color_name
 
-        if self.save_to_pdf_mode:
-            try:
-                page = self.doc[page_idx]
-                annot = page.add_text_annot(fitz.Point(fx, fy), text)
-                if annot:
-                    annot.update()
-                self.save_pdf_highlights()
-            except Exception as e:
-                print(f"Sticky annot failed: {e}")
-
-        node = {
-            "text": f"Sticky note (p.{page_idx + 1})", "custom_note": text,
-            "role": "note", "sticky": True, "children": [],
-            "page": page_idx + 1, "color": cname,
-            "fitz_rects": [[fx, fy, fx + 9, fy + 9]]
-        }
+        self.pdf.add_sticky(page_idx, fx, fy, text)
+        node = N.sticky_node(text, page_idx + 1, fx, fy, cname)
         parent = self.current_h4 or self.current_h3 or self.current_h2 or self.current_h1
         (parent["children"] if parent else self.annotations).append(node)
         self.render_tree()
@@ -1945,27 +1373,9 @@ class MainWindow(QMainWindow):
         ph = min(img.height(), 260) / zf
         area_rect = fitz.Rect(fx, fy, fx + pw, fy + ph)
 
-        if self.save_to_pdf_mode:
-            try:
-                page = self.doc[page_idx]
-                # Embed the drawing image into the page so any PDF reader shows it
-                page.insert_image(area_rect, filename=filepath, keep_proportion=True)
-                self.save_pdf_highlights()
-                node_xref_note = True
-            except Exception as e:
-                print(f"Sketch stamp failed: {e}")
-
-        node = {
-            "text": f"![[attachments/{filename}]]",
-            "custom_note": "",
-            "role": "sketch_sticky",
-            "collapsed": self.sketch_default_collapsed,
-            "locked": False,
-            "children": [],
-            "page": page_idx + 1,
-            "img_path": filepath, "img_name": filename,
-            "fitz_rects": [[area_rect.x0, area_rect.y0, area_rect.x1, area_rect.y1]],
-        }
+        self.pdf.embed_image(page_idx, area_rect, filepath)
+        node = N.sketch_node(filename, filepath, page_idx + 1, area_rect,
+                             self.sketch_default_collapsed)
         parent = self.current_h4 or self.current_h3 or self.current_h2 or self.current_h1
         (parent["children"] if parent else self.annotations).append(node)
         self.render_tree()
@@ -1973,40 +1383,93 @@ class MainWindow(QMainWindow):
         self.export_markdown()
         self.statusBar().showMessage(f"🖌 Sketch sticky saved: {filename}", 3000)
 
-    def _find_node_at(self, page_idx, px, py):
-        """Return the topmost sketch/sticky node whose icon/box contains (px,py) in PDF coords."""
+    STICKY_NOTE_W = 210   # expanded text-sticky box size in screen px
+    STICKY_NOTE_H = 100
+
+    def _find_pin_at(self, page_idx, sx, sy):
+        """Return the topmost sketch/text-sticky node whose drawn icon/box contains
+        (sx, sy) — screen pixels relative to the page's top-left, matching exactly
+        what show_page paints."""
+        zf = self.zoom_factor
         hit = None
-        def walk(nodes):
-            nonlocal hit
-            for n in nodes:
-                if n.get("page") == page_idx + 1 and n.get("role") == "sketch_sticky":
-                    for rc in n.get("fitz_rects", []):
-                        if len(rc) == 4:
-                            if n.get("collapsed", True):
-                                # collapsed icon is a small square at the top-left anchor
-                                if rc[0] <= px <= rc[0] + 20 and rc[1] <= py <= rc[1] + 20:
-                                    hit = n
-                            else:
-                                if rc[0] <= px <= rc[2] and rc[1] <= py <= rc[3]:
-                                    hit = n
-                walk(n.get("children", []))
-        walk(self.annotations)
+        for n in N.walk(self.annotations):
+            if n.get("page") != page_idx + 1:
+                continue
+            rects = n.get("fitz_rects", [])
+            if not rects or len(rects[0]) != 4:
+                continue
+            rc = rects[0]
+            ax, ay = rc[0] * zf, rc[1] * zf  # anchor in screen px
+            if n.get("role") == "sketch_sticky":
+                if n.get("collapsed", True):
+                    if ax <= sx <= ax + 20 and ay <= sy <= ay + 20:
+                        hit = n
+                else:
+                    if rc[0] * zf <= sx <= rc[2] * zf and rc[1] * zf <= sy <= rc[3] * zf:
+                        hit = n
+            elif n.get("sticky"):
+                if n.get("collapsed", True):
+                    if ax <= sx <= ax + 16 and ay <= sy <= ay + 16:
+                        hit = n
+                else:
+                    if ax <= sx <= ax + self.STICKY_NOTE_W and ay <= sy <= ay + self.STICKY_NOTE_H:
+                        hit = n
         return hit
 
     def handle_sketch_click(self, viewer_pos):
-        """Called on left-click when not selecting: toggle a sketch sticky if hit. Returns True if handled."""
+        """Left-click on a pin (sketch or text sticky) toggles it open/collapsed.
+        Returns True if the click was handled."""
+        if self.doc is None or getattr(self.doc, 'is_closed', False):
+            return False
+        page_idx, off = self.locate_page(viewer_pos.y())
+        sx, sy = viewer_pos.x(), viewer_pos.y() - off
+        node = self._find_pin_at(page_idx, sx, sy)
+        if not node:
+            return False
+        if self.eraser_action.isChecked():
+            self.delete_node(node)
+            self.statusBar().showMessage("🧽 Erased.", 1500)
+            return True
+        node["collapsed"] = not node.get("collapsed", True)
+        self.render_tree()
+        self.show_page(scroll_to_current=False)
+        return True
+
+    def erase_at(self, viewer_pos):
+        """Eraser tool: delete the ink stroke or pin under the cursor."""
         if self.doc is None or getattr(self.doc, 'is_closed', False):
             return False
         page_idx, off = self.locate_page(viewer_pos.y())
         zf = self.zoom_factor
-        px, py = viewer_pos.x() / zf, (viewer_pos.y() - off) / zf
-        node = self._find_node_at(page_idx, px, py)
-        if not node:
+        sx, sy = viewer_pos.x(), viewer_pos.y() - off
+
+        # 1. Pins (sketch / text sticky) — exact icon/box hit
+        node = self._find_pin_at(page_idx, sx, sy)
+        # 2. Ink strokes — within a small radius of any stroke point
+        if node is None:
+            RADIUS = 8  # screen px
+            for n in N.walk(self.annotations):
+                if n.get("role") == "ink" and n.get("page") == page_idx + 1:
+                    for px, py in n.get("ink_points", []):
+                        if abs(px * zf - sx) <= RADIUS and abs(py * zf - sy) <= RADIUS:
+                            node = n
+                            break
+                if node:
+                    break
+        # 3. Area-capture boxes
+        if node is None:
+            for n in N.walk(self.annotations):
+                if n.get("role") == "image" and n.get("page") == page_idx + 1:
+                    for rc in n.get("fitz_rects", []):
+                        if len(rc) == 4 and rc[0]*zf <= sx <= rc[2]*zf and rc[1]*zf <= sy <= rc[3]*zf:
+                            node = n
+                            break
+                if node:
+                    break
+        if node is None:
             return False
-        node["collapsed"] = not node.get("collapsed", True)
-        self.render_tree()
-        self.show_page(scroll_to_current=False)
-        self.export_markdown()
+        self.delete_node(node)
+        self.statusBar().showMessage("🧽 Erased.", 1500)
         return True
 
     def toggle_sketch_lock(self, node):
@@ -2142,23 +1605,12 @@ class MainWindow(QMainWindow):
         cname = self._pick_color_for_role(role)
         target_page_idx = self.sel_page_idx if self.continuous_mode else self.current_page_idx
 
-        if self.save_to_pdf_mode and self.doc is not None and not getattr(self.doc, 'is_closed', False):
-            page = self.doc[target_page_idx]
-            add_annot = self._pdf_annot_method(page, self.markup_style)
-            for r in sel_rects:
-                annot = add_annot(r)
-                if annot:
-                    annot.set_colors(stroke=HIGHLIGHT_COLORS[cname])
-                    annot.update()
-            self.save_pdf_highlights()
+        if self.pdf.add_markup(target_page_idx, sel_rects, self.markup_style, cname):
             self.show_page(scroll_to_current=False)
 
-        node = {
-            "text": text, "custom_note": custom_note, "role": role,
-            "children": [], "page": target_page_idx + 1,
-            "color": cname, "style": self.markup_style,
-            "fitz_rects": [[r.x0, r.y0, r.x1, r.y1] for r in sel_rects]
-        }
+        node = N.markup_node(text, role, target_page_idx + 1,
+                             [[r.x0, r.y0, r.x1, r.y1] for r in sel_rects],
+                             cname, self.markup_style, custom_note)
 
         if role == "h1":
             self.annotations.append(node)
@@ -2298,9 +1750,6 @@ class MainWindow(QMainWindow):
         self.tree_widget.clear()
         self.tree_item_to_node = {}
 
-        def count_descendants(n):
-            return len(n["children"]) + sum(count_descendants(c) for c in n["children"])
-
         def add_nodes(parent_widget, nodes):
             for n in nodes:
                 item = QTreeWidgetItem(parent_widget)
@@ -2331,7 +1780,7 @@ class MainWindow(QMainWindow):
 
                 # Count badge for headers with children
                 if n["children"]:
-                    display_text += f"  ({count_descendants(n)})"
+                    display_text += f"  ({N.count_descendants(n)})"
 
                 item.setText(0, display_text)
 
@@ -2454,30 +1903,17 @@ class MainWindow(QMainWindow):
     def delete_annotation(self, item):
         node_to_delete = self.tree_item_to_node.get(id(item))
         if not node_to_delete: return
+        self.delete_node(node_to_delete)
 
-        def remove_from_list(nodes, target):
-            for i, n in enumerate(nodes):
-                if n is target:
-                    nodes.pop(i)
-                    return True
-                if remove_from_list(n["children"], target):
-                    return True
-            return False
-
-        if remove_from_list(self.annotations, node_to_delete):
-            def get_all_nodes(nodes):
-                res = set()
-                for n in nodes:
-                    res.add(id(n))
-                    res.update(get_all_nodes(n["children"]))
-                return res
-            
-            active = get_all_nodes(self.annotations)
+    def delete_node(self, node_to_delete):
+        """Remove a node from the tree and clean its traces from the PDF."""
+        if N.remove_node(self.annotations, node_to_delete):
+            active = N.all_ids(self.annotations)
             if self.current_h1 and id(self.current_h1) not in active: self.current_h1 = None
             if self.current_h2 and id(self.current_h2) not in active: self.current_h2 = None
             if self.current_h3 and id(self.current_h3) not in active: self.current_h3 = None
             if self.current_h4 and id(self.current_h4) not in active: self.current_h4 = None
-            
+
             if self.doc is not None and not getattr(self.doc, 'is_closed', False):
                 # Always clean up matching PDF annots (no-op if none were ever saved),
                 # and persist immediately so the deletion sticks even with toggle OFF
@@ -2488,62 +1924,7 @@ class MainWindow(QMainWindow):
             self.export_markdown()
 
     def remove_pdf_highlights(self, node):
-        """Remove PDF highlight annotations matching the given annotation node."""
-        if self.doc is None or getattr(self.doc, 'is_closed', False):
-            return
-
-        def collect_nodes(n):
-            yield n
-            for child in n.get("children", []):
-                yield from collect_nodes(child)
-
-        for n in collect_nodes(node):
-            page_idx = n.get("page", 1) - 1
-            if page_idx < 0 or page_idx >= len(self.doc):
-                continue
-
-            # Sketch stickies embed a real image on the page — cover it on delete.
-            # (delete_image is unreliable across PyMuPDF versions; redaction is robust.)
-            if n.get("role") == "sketch_sticky" and n.get("fitz_rects"):
-                try:
-                    page = self.doc[page_idx]
-                    target = fitz.Rect(n["fitz_rects"][0])
-                    page.add_redact_annot(target, fill=(1, 1, 1))
-                    page.apply_redactions()
-                except Exception as e:
-                    print(f"Sketch image cleanup failed: {e}")
-
-            stored_rects = n.get("fitz_rects", [])
-            text = n.get("text", "")
-
-            # Build list of fitz.Rect targets to match against
-            target_rects = [fitz.Rect(sr) for sr in stored_rects if len(sr) == 4]
-            if not target_rects and text and not text.startswith("![["):
-                page = self.doc[page_idx]
-                target_rects = page.search_for(text[:50])
-
-            if not target_rects:
-                continue
-
-            # Simple loop: delete one matching annotation at a time, re-scan after each
-            keep_going = True
-            while keep_going:
-                keep_going = False
-                page = self.doc[page_idx]  # Fresh reference
-                try:
-                    for annot in page.annots():
-                        if annot.type[0] not in (0, 4, 8, 9, 10, 11, 15):
-                            continue
-                        ar = annot.rect
-                        for tr in target_rects:
-                            if self._rects_match(ar, tr):
-                                page.delete_annot(annot)
-                                keep_going = True
-                                break
-                        if keep_going:
-                            break  # Restart scan
-                except Exception:
-                    break
+        self.pdf.remove_matching(node)
 
     # ── Export / Import ──────────────────────────────────────────────────────
     def get_markdown(self):
@@ -2633,11 +2014,24 @@ class MainWindow(QMainWindow):
         self.viewer.pen_color = pen_qcolor(self.pen_color_name)
         self.viewer.pen_width = self.pen_width
         if checked:
+            # Pen and eraser are mutually exclusive
+            if self.eraser_action.isChecked():
+                self.eraser_action.setChecked(False)
             self.viewer.setCursor(Qt.CursorShape.CrossCursor)
             self.statusBar().showMessage(f"✏ Pen on — {self.pen_color_name}, width {self.pen_width}. Draw on the page.", 4000)
         else:
             self.viewer.setCursor(Qt.CursorShape.ArrowCursor)
             self.viewer.clear_selection()
+
+    def toggle_eraser_mode(self, checked):
+        if checked:
+            if self.pen_action.isChecked():
+                self.pen_action.setChecked(False)
+                self.toggle_draw_mode(False)
+            self.viewer.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.statusBar().showMessage("🧽 Eraser on — click a stroke, sticky, sketch, or capture box to delete it.", 4000)
+        else:
+            self.viewer.setCursor(Qt.CursorShape.ArrowCursor)
 
     def set_pen_color(self, cname):
         self.pen_color_name = cname
@@ -2668,24 +2062,10 @@ class MainWindow(QMainWindow):
         xs = [p[0] for p in pdf_pts]; ys = [p[1] for p in pdf_pts]
         bbox = [min(xs), min(ys), max(xs), max(ys)]
 
-        if self.save_to_pdf_mode:
-            try:
-                page = self.doc[page_idx]
-                annot = page.add_ink_annot([[(float(px), float(py)) for px, py in pdf_pts]])
-                if annot:
-                    annot.set_colors(stroke=PEN_COLORS[self.pen_color_name])
-                    annot.set_border(width=self.pen_width)
-                    annot.update()
-                self.save_pdf_highlights()
-            except Exception as e:
-                print(f"Ink annot failed: {e}")
+        self.pdf.add_ink(page_idx, pdf_pts, self.pen_color_name, self.pen_width)
 
-        node = {
-            "text": f"Drawing (p.{page_idx + 1})", "custom_note": "",
-            "role": "ink", "children": [], "page": page_idx + 1,
-            "pen_color": self.pen_color_name, "pen_width": self.pen_width,
-            "ink_points": pdf_pts, "fitz_rects": [bbox],
-        }
+        node = N.ink_node(page_idx + 1, pdf_pts, bbox,
+                          self.pen_color_name, self.pen_width)
         parent = self.current_h4 or self.current_h3 or self.current_h2 or self.current_h1
         (parent["children"] if parent else self.annotations).append(node)
         self.render_tree()
@@ -2723,13 +2103,6 @@ class MainWindow(QMainWindow):
         self.markup_style = style
         self.save_settings()
 
-    def _pdf_annot_method(self, page, style):
-        return {
-            "Underline": page.add_underline_annot,
-            "Strikeout": page.add_strikeout_annot,
-            "Squiggly": page.add_squiggly_annot,
-        }.get(style, page.add_highlight_annot)
-
     def _pick_color_for_role(self, role):
         """Auto color-by-type if enabled in settings, else the toolbar color."""
         if self.auto_color:
@@ -2744,18 +2117,15 @@ class MainWindow(QMainWindow):
         self.review_item_to_node = {}
         want_color = self.review_color_filter.currentText()
 
-        def walk(nodes):
-            for n in nodes:
-                if n["role"] in ("highlight", "note"):
-                    if want_color == "All colors" or n.get("color", "Yellow") == want_color:
-                        label = n.get("custom_note") or n.get("text", "")
-                        prefix = "📌 " if n.get("sticky") else ""
-                        item = QTreeWidgetItem([f"{prefix}{label[:70]}", str(n.get("page", "?"))])
-                        item.setForeground(0, hl_qcolor(n.get("color", "Yellow"), 255).lighter(115))
-                        self.review_list.addTopLevelItem(item)
-                        self.review_item_to_node[id(item)] = n
-                walk(n.get("children", []))
-        walk(self.annotations)
+        for n in N.walk(self.annotations):
+            if n["role"] in ("highlight", "note"):
+                if want_color == "All colors" or n.get("color", "Yellow") == want_color:
+                    label = n.get("custom_note") or n.get("text", "")
+                    prefix = "📌 " if n.get("sticky") else ""
+                    item = QTreeWidgetItem([f"{prefix}{label[:70]}", str(n.get("page", "?"))])
+                    item.setForeground(0, hl_qcolor(n.get("color", "Yellow"), 255).lighter(115))
+                    self.review_list.addTopLevelItem(item)
+                    self.review_item_to_node[id(item)] = n
 
     def on_review_clicked(self, item, column):
         node = self.review_item_to_node.get(id(item))
@@ -2796,7 +2166,6 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            import csv
             with open(path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
                 for front, back, page in rows:
@@ -2882,10 +2251,8 @@ class MainWindow(QMainWindow):
         if not s:
             return
         # Flush any pending save of the outgoing doc
-        if self._save_timer.isActive():
-            self._save_timer.stop()
-            self._do_save_pdf()
-        self.doc = s["doc"]
+        self.pdf.flush()
+        self.pdf.adopt(s["doc"], path)
         self.pdf_path = path
         self.source_title = s["title"]
         self.current_page_idx = s["page"]
@@ -2936,9 +2303,8 @@ class MainWindow(QMainWindow):
         # Flush & close the document
         try:
             if doc is not None and not getattr(doc, 'is_closed', False):
-                if closing_current and self._save_timer.isActive():
-                    self._save_timer.stop()
-                    self._do_save_pdf()
+                if closing_current:
+                    self.pdf.flush()
                 doc.close()
         except Exception:
             pass
@@ -2968,46 +2334,10 @@ class MainWindow(QMainWindow):
                 self.doc_tabs.hide()
 
     def save_pdf_highlights(self):
-        """Schedule a debounced PDF save — doesn't block the UI."""
-        if self.doc is None or getattr(self.doc, 'is_closed', False) or not self.save_to_pdf_mode:
-            return
-        # Restart the timer (debounce: saves 2s after last change)
-        self._save_timer.start()
+        self.pdf.schedule_save()
 
     def _do_save_pdf(self, force=False):
-        """Perform the PDF save. Debounced additions use fast incremental saves;
-        force=True (used after deletions) does a clean full save, because repeated
-        incremental saves after annot deletions can corrupt the xref table."""
-        if self.doc is None or getattr(self.doc, 'is_closed', False):
-            return
-        if not self.save_to_pdf_mode and not force:
-            return
-        if force:
-            self._full_save_pdf()
-            return
-        try:
-            self.doc.saveIncr()
-        except Exception as e:
-            print(f"saveIncr failed: {e}")
-            self._full_save_pdf()
-
-    def _full_save_pdf(self):
-        """Rewrite the whole file cleanly (tmp + atomic swap), then reopen."""
-        try:
-            temp_path = self.pdf_path + ".tmp"
-            self.doc.save(temp_path, incremental=False)
-            self.doc.close()
-            os.replace(temp_path, self.pdf_path)
-            self.doc = fitz.open(self.pdf_path)
-        except Exception as e2:
-            print(f"Full save failed: {e2}")
-            # If doc got closed but reopen failed, try to recover
-            if getattr(self.doc, 'is_closed', True):
-                try:
-                    self.doc = fitz.open(self.pdf_path)
-                except Exception:
-                    self.doc = None
-                    self.statusBar().showMessage("⚠ PDF save failed. Reopen the PDF.", 10000)
+        self.pdf.save_now(force=force)
 
     def load_markdown(self):
         path, _ = QFileDialog.getOpenFileName(self, "Load Markdown Session", self.vault_path, "Markdown Files (*.md)")
@@ -3104,10 +2434,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Error loading: {e}", 5000)
 
     def closeEvent(self, event):
-        # Flush any pending debounced PDF save before closing
-        if self._save_timer.isActive():
-            self._save_timer.stop()
-            self._do_save_pdf()
+        self.pdf.flush()
         self.save_bookmark()
         self.save_settings()
         # Close documents held by background tabs

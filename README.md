@@ -59,3 +59,27 @@ Keyboard shortcuts are fully customizable directly from the app interface!
 The application requires Python 3.x and the packages listed in `requirements.txt`:
 - `PyQt6` (for the GUI)
 - `PyMuPDF` (for rendering and interacting with PDFs)
+
+
+## Architecture
+
+The codebase is split into focused modules:
+
+| Module | Responsibility |
+|---|---|
+| `main.py` | MainWindow: UI wiring, annotation tree, tabs, exports |
+| `pdf_store.py` | **All** PDF I/O: open/auto-repair, debounced & full saves, annotation writes, removal, tree sync |
+| `viewer.py` | The page viewer widget: text selection, ink strokes, sketch-sticky clicks |
+| `sketch.py` | The Sketch Sticky drawing canvas (pen + pixel eraser) |
+| `nodes.py` | Annotation node schema, factories, and tree helpers |
+| `theme.py` | Themes, color palettes, and the global stylesheet |
+| `widgets.py` | Small reusable widgets |
+
+Run with `python main.py` as before.
+
+
+## Testing & Maintenance
+
+- **`python test_app.py`** — full regression suite (34 tests, ~2s, headless, stdlib unittest only). Run before committing changes.
+- **`python repair.py <file.pdf>`** — PDF doctor: detects xref corruption and silent structural damage, rebuilds via pikepdf with a `.bak` backup. Add `--check` to inspect without modifying.
+- **`python repair.py --vault [--fix]`** — vault doctor: finds notes referencing missing attachment images, orphaned attachments, and stale bookmarks. `--fix` quarantines orphans into `attachments/_orphaned/`.
