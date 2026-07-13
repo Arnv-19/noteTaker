@@ -1016,8 +1016,16 @@ class MainWindow(QMainWindow):
                         if n.get("role") == "sketch_sticky":
                             rc = (n.get("fitz_rects") or [[0,0,0,0]])[0]
                             if len(rc) == 4:
+                                x, y = rc[0]*zf, n_off + rc[1]*zf
+                                w_px = int((rc[2]-rc[0])*zf)
+                                h_px = int((rc[3]-rc[1])*zf)
                                 if n.get("collapsed", True):
-                                    x, y = rc[0]*zf, n_off + rc[1]*zf
+                                    # Cover the embedded PDF image with white so
+                                    # it doesn't bleed through the collapsed icon
+                                    painter.setBrush(QColor(255, 255, 255))
+                                    painter.setPen(Qt.PenStyle.NoPen)
+                                    painter.drawRect(int(x), int(y), max(w_px, 22), max(h_px, 22))
+                                    # Draw collapsed icon
                                     painter.setBrush(QColor(255, 214, 120, 240))
                                     painter.setPen(QPen(QColor(150, 110, 0), 1))
                                     painter.drawRoundedRect(int(x), int(y), 20, 20, 4, 4)
@@ -1026,20 +1034,23 @@ class MainWindow(QMainWindow):
                                     painter.drawEllipse(int(x+11), int(y+3), 5, 5)
                                     painter.setPen(Qt.PenStyle.NoPen)
                                 else:
-                                    x, y = int(rc[0]*zf), int(n_off + rc[1]*zf)
-                                    w_px = int((rc[2]-rc[0])*zf); h_px = int((rc[3]-rc[1])*zf)
-                                    cached = self._sketch_pixmap(n.get("img_path"))
+                                    x, y = int(x), int(y)
                                     locked = n.get("locked", False)
-                                    painter.setBrush(QColor(255, 252, 235, 245))
+                                    # The PDF image already shows the sketch;
+                                    # just draw the border on top
+                                    painter.setBrush(Qt.BrushStyle.NoBrush)
                                     painter.setPen(QPen(QColor(220, 60, 60) if locked else QColor(150, 110, 0),
                                                         2 if locked else 1))
                                     painter.drawRoundedRect(x-3, y-3, w_px+6, h_px+6, 5, 5)
                                     painter.setPen(Qt.PenStyle.NoPen)
-                                    if cached is not None and not cached.isNull():
-                                        scaled = cached.scaled(max(1,w_px), max(1,h_px),
-                                                               Qt.AspectRatioMode.KeepAspectRatio,
-                                                               Qt.TransformationMode.SmoothTransformation)
-                                        painter.drawPixmap(x, y, scaled)
+                                    # If no PDF image (save-to-pdf off), draw from cache
+                                    if not n.get("img_xref"):
+                                        cached = self._sketch_pixmap(n.get("img_path"))
+                                        if cached and not cached.isNull():
+                                            scaled = cached.scaled(max(1,w_px), max(1,h_px),
+                                                                   Qt.AspectRatioMode.KeepAspectRatio,
+                                                                   Qt.TransformationMode.SmoothTransformation)
+                                            painter.drawPixmap(x, y, scaled)
                         elif n.get("sticky"):
                             for rc in n.get("fitz_rects", []):
                                 if len(rc) != 4:
@@ -1373,9 +1384,11 @@ class MainWindow(QMainWindow):
         ph = min(img.height(), 260) / zf
         area_rect = fitz.Rect(fx, fy, fx + pw, fy + ph)
 
-        self.pdf.embed_image(page_idx, area_rect, filepath)
+        img_xref = self.pdf.embed_image(page_idx, area_rect, filepath)
         node = N.sketch_node(filename, filepath, page_idx + 1, area_rect,
                              self.sketch_default_collapsed)
+        if img_xref:
+            node["img_xref"] = img_xref
         parent = self.current_h4 or self.current_h3 or self.current_h2 or self.current_h1
         (parent["children"] if parent else self.annotations).append(node)
         self.render_tree()
@@ -1495,10 +1508,10 @@ class MainWindow(QMainWindow):
             return
         existing = QImage(node.get("img_path", "")) if node.get("img_path") else None
         dlg = SketchCanvasDialog(self, existing_image=existing,
-                                 pen_color=pen_qcolor(self.pen_color_name), pen_width=self.pen_width)
+                                 pen_color=pen_qcolor(self.pen_color_name),
+                                 pen_width=self.pen_width)
         if dlg.exec() != QDialog.DialogCode.Accepted or dlg.result_image is None:
             return
-        # Overwrite the same file so links stay valid; bust the cache
         path = node.get("img_path")
         try:
             dlg.result_image.save(path, "PNG")
@@ -1507,8 +1520,14 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"Re-draw save failed: {e}")
             return
+        # Replace the embedded image in the PDF using the stored xref
+        page_idx = node.get("page", 1) - 1
+        img_xref = node.get("img_xref")
+        if img_xref and self.pdf.valid and 0 <= page_idx < len(self.doc):
+            self.pdf.update_image(page_idx, img_xref, path)
         self.render_tree()
         self.show_page(scroll_to_current=False)
+        self.export_markdown()
         self.statusBar().showMessage("Sketch updated.", 2000)
 
     def _get_inline_selection(self, p1, p2):

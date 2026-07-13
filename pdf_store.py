@@ -214,16 +214,47 @@ class PdfStore(QObject):
             return False
 
     def embed_image(self, page_idx, rect, filepath):
-        """Embed an image (sketch sticky) into the page content."""
-        if not (self.valid and self.save_enabled):
+        """Embed a sketch image into the page. Returns the image xref (stored on
+        the node so it can be replaced/blanked without using fragile rect-matching)."""
+        if not self.valid:
+            return None
+        try:
+            page = self.doc[page_idx]
+            xref = page.insert_image(rect, filename=filepath)
+            self.schedule_save()
+            return xref
+        except Exception as e:
+            print(f"Sketch stamp failed: {e}")
+            return None
+
+    def update_image(self, page_idx, img_xref, new_filepath):
+        """Replace an embedded sketch image in-place using its xref."""
+        if not self.valid or not img_xref:
             return False
         try:
             page = self.doc[page_idx]
-            page.insert_image(rect, filename=filepath, keep_proportion=True)
-            self.schedule_save()
+            pix = fitz.Pixmap(new_filepath)
+            page.replace_image(img_xref, pixmap=pix)
+            self.save_now(force=True)
             return True
         except Exception as e:
-            print(f"Sketch stamp failed: {e}")
+            print(f"Sketch update failed: {e}")
+            return False
+
+    def blank_image(self, page_idx, img_xref):
+        """Replace a sketch image with a 1×1 white pixel (visually erases it
+        without touching page text — redaction would wipe content underneath)."""
+        if not self.valid or not img_xref:
+            return False
+        try:
+            page = self.doc[page_idx]
+            blank = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 1, 1), False)
+            blank.clear_with(255)
+            page.replace_image(img_xref, pixmap=blank)
+            self.save_now(force=True)
+            return True
+        except Exception as e:
+            print(f"Sketch blank failed: {e}")
             return False
 
     # ── Removing ─────────────────────────────────────────────────────────────
@@ -236,21 +267,14 @@ class PdfStore(QObject):
             if page_idx < 0 or page_idx >= len(self.doc):
                 continue
 
-            # Sketch stickies embed a real image — delete exactly that image.
-            # (Redaction is NOT used: it would wipe underlying page text too.)
-            if n.get("role") == "sketch_sticky" and n.get("fitz_rects"):
-                try:
-                    page = self.doc[page_idx]
-                    target = fitz.Rect(n["fitz_rects"][0])
-                    for info in page.get_image_info(xrefs=True):
-                        ibbox = fitz.Rect(info["bbox"])
-                        if rects_match(ibbox, target) and info.get("xref"):
-                            try:
-                                page.delete_image(info["xref"])
-                            except Exception:
-                                pass
-                except Exception as e:
-                    print(f"Sketch image cleanup failed: {e}")
+            # Sketch stickies embed a real image — blank it using its stored xref.
+            # blank_image replaces it with a 1×1 white pixel which is visually
+            # invisible but preserves page text (unlike redaction which wipes content).
+            if n.get("role") == "sketch_sticky":
+                img_xref = n.get("img_xref")
+                page_idx = n.get("page", 1) - 1
+                if img_xref and 0 <= page_idx < len(self.doc):
+                    self.blank_image(page_idx, img_xref)
 
             stored_rects = n.get("fitz_rects", [])
             text = n.get("text", "")
