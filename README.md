@@ -4,16 +4,26 @@ A beautiful, lightweight, and highly customizable PDF annotator built specifical
 
 ## Features
 
-- **Obsidian Integration:** Automatically saves annotations as Markdown directly in your Obsidian vault.
-- **Save to PDF:** All highlights are optionally saved back to the original textbook PDF.
-- **Robust Rendering:** Notes and highlights are securely drawn on screen directly from your Markdown data, meaning zero lagging and instant visual feedback, even if you turn off "Save to PDF".
-- **Recent Files:** A quick-access menu showing your last 10 opened PDFs. Remove them with a single click if you want to clear your history!
-- **Bookmarks:** The app automatically remembers the last page you were on for every PDF you open. Jump right back to where you left off.
-- **Multiple Themes:** Choose from beautiful themes like Dark Black, Blue, Purple, and Sepia, along with a Night Mode toggle.
-- **Rich Annotations:** Support for headers (H1-H4), highlights, text notes, and inline image snippets (screenshots).
-- **Customizable Shortcuts:** Bind any tool to any key sequence through the built-in Interactive Shortcut Editor.
-- **Session Restoration:** Load an existing Markdown annotation session and the app will automatically rebuild your annotation tree and highlight your PDF.
-- **Table of Contents:** Quick navigation through the builtin PDF outline.
+- **Obsidian Integration:** Automatically saves annotations as Markdown directly in your Obsidian vault — one `.md` file per PDF.
+- **Multiple PDFs (Tabs):** Open several PDFs at once in tabs. Each tab keeps its own annotation tree, page position, and zoom; each exports to its own Markdown file.
+- **Continuous Scroll:** Toggle 📜 for a smooth multi-page scrolling view, or keep classic single-page mode.
+- **Save to PDF:** Highlights are optionally saved back into the PDF file. Turning the toggle ON backfills highlights made while it was off; deleting a note removes it from the PDF too.
+- **Freehand Pen:** Draw directly on pages with a pressure-free ink tool (Red/Black/Blue/Green/White, adjustable thickness). Strokes save as real PDF ink annotations, render live, and can be erased individually or deleted from the tree.
+- **Markup Styles:** Highlight, Underline, Strikeout, or Squiggly — pick from the toolbar.
+- **Highlight Colors:** Yellow, Green, Pink, Blue, Orange. Optional auto color-coding by annotation type (configure per-type colors in Settings).
+- **Sketch Stickies:** Drop a resizable drawing canvas on the page, sketch with pen + pixel eraser, and save. Saved sketches collapse to a small 🖌 icon (many can sit on one page without clutter) and expand on click. Each is embedded into the PDF as an image (visible in any reader), can be locked in place, and re-drawn later. Default collapsed/expanded state is configurable in Settings.
+- **Sticky Notes:** Right-click anywhere on a page to pin a sticky note at that exact spot (saved as a real PDF text annotation).
+- **Quick Selection:** Double-click selects a word, triple-click selects the whole paragraph.
+- **Area Captures:** Screenshot a figure or diagram region — it's embedded in your Markdown and optionally boxed in the PDF.
+- **Review Tab:** A flat list of every highlight and note, filterable by color — perfect for revision.
+- **Anki Export:** One click exports your highlights and notes as an Anki-importable flashcard CSV.
+- **Edit & Organize:** Edit annotation text/notes, recolor from the right-click menu, drag-and-drop to reorder, filter the tree, and clear per-page or all annotations.
+- **Recent Files & Bookmarks:** Quick access to your last 10 PDFs; the app remembers your last page in every document.
+- **Multiple Themes:** Dark Black, AMOLED (pure black), Blue, Purple, Sepia, plus Night Mode page inversion.
+- **Rich Annotations:** Headers (H1-H4) with live child-count badges, highlights, notes, stickies, and image snippets.
+- **Customizable Shortcuts:** Bind any tool to any key sequence through the built-in Shortcut Editor.
+- **Session Restoration:** Load an existing Markdown session to rebuild your annotation tree.
+- **Table of Contents:** Quick navigation through the built-in PDF outline.
 
 ## Easy Setup for New Users
 
