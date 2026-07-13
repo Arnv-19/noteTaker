@@ -784,6 +784,7 @@ class MainWindow(QMainWindow):
         # Add as annotation node (stores the area rect so it draws as a box outline)
         node = N.image_node(filename, cap_page_idx + 1, area_rect,
                             self._pick_color_for_role("highlight"))
+        node["show_box"] = self.screenshot_box
         parent = self.current_h4 or self.current_h3 or self.current_h2 or self.current_h1
         if parent:
             parent["children"].append(node)
@@ -1094,7 +1095,7 @@ class MainWindow(QMainWindow):
                                 painter.drawLine(int(x0*zf), int(n_off + y0*zf),
                                                  int(x1*zf), int(n_off + y1*zf))
                             painter.setPen(Qt.PenStyle.NoPen)
-                        elif n.get("role") == "image" and n.get("fitz_rects"):
+                        elif n.get("role") == "image" and n.get("fitz_rects") and n.get("show_box", True):
                             # Area-capture box outline
                             for rc in n.get("fitz_rects", []):
                                 if len(rc) == 4:
@@ -1811,7 +1812,11 @@ class MainWindow(QMainWindow):
                 if role in ("highlight", "note"):
                     item.setForeground(0, hl_qcolor(n.get("color", "Yellow"), 255).lighter(115))
                 elif role == "ink":
-                    item.setForeground(0, pen_qcolor(n.get("pen_color", "Red")))
+                    cname = n.get("pen_color", "Red")
+                    qc = pen_qcolor(cname)
+                    if cname == "Black" or qc.lightness() < 60:
+                        qc = QColor(170, 170, 170)
+                    item.setForeground(0, qc)
                 else:
                     item.setForeground(0, QColor(colors.get(role, "#c0caf5")))
 
