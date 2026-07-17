@@ -35,6 +35,7 @@ from widgets import ToggleSwitch
 from viewer import PDFViewer
 from sketch import SketchCanvasDialog
 from pdf_store import PdfStore, rects_match
+import ppt_convert
 import nodes as N
 
 class MainWindow(QMainWindow):
@@ -850,7 +851,9 @@ class MainWindow(QMainWindow):
 
     # ── PDF Open / Navigate ──────────────────────────────────────────────────
     def open_pdf(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Open PDF", "", "PDF Files (*.pdf)")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open Document", "",
+            "Documents (*.pdf *.pptx *.ppt *.ppsx *.pps);;PDF Files (*.pdf);;PowerPoint (*.pptx *.ppt *.ppsx *.pps)")
         if path:
             self.open_pdf_path(path)
 
@@ -858,6 +861,22 @@ class MainWindow(QMainWindow):
         if not os.path.exists(path):
             self.statusBar().showMessage(f"File not found: {path}", 3000)
             return
+
+        display_title = os.path.splitext(os.path.basename(path))[0]
+        if ppt_convert.is_ppt(path):
+            self.statusBar().showMessage("Converting slides to PDF…", 0)
+            QApplication.processEvents()
+            converted = ppt_convert.convert_ppt_to_pdf(path)
+            self.statusBar().clearMessage()
+            if converted is None:
+                QMessageBox.warning(
+                    self, "Slide Conversion Failed",
+                    "Couldn't convert the PowerPoint file to PDF.\n\n"
+                    "This feature needs either Microsoft PowerPoint or LibreOffice "
+                    "installed. Notes and highlights are made on the converted PDF "
+                    "copy (<name>.slides.pdf); the original deck is never modified.")
+                return
+            path = converted
 
         abs_path = os.path.abspath(path)
         # Already open in a tab? Just switch to it.
@@ -876,7 +895,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Failed to open or repair corrupted PDF: {path}", 5000)
             return
         self.pdf_path = abs_path
-        self.source_title = os.path.splitext(os.path.basename(path))[0]
+        self.source_title = display_title
         self.add_to_recent(path)
         self._register_tab(abs_path)
 
