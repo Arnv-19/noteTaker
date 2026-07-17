@@ -5,6 +5,7 @@ A beautiful, lightweight, and highly customizable PDF annotator built specifical
 ## Features
 
 - **Obsidian Integration:** Automatically saves annotations as Markdown directly in your Obsidian vault — one `.md` file per PDF.
+- **PowerPoint Support:** Open `.pptx`/`.ppt` decks directly — they're auto-converted to a sibling `<name>.slides.pdf` (via installed MS PowerPoint, or LibreOffice as fallback) and every annotation feature works on the slides: text selection, highlights, markdown notes, pen, stickies. The converted PDF is cached and reused, so your annotations persist; the original deck is never modified. Requires PowerPoint or LibreOffice to be installed.
 - **Multiple PDFs (Tabs):** Open several PDFs at once in tabs. Each tab keeps its own annotation tree, page position, and zoom; each exports to its own Markdown file.
 - **Continuous Scroll:** Toggle 📜 for a smooth multi-page scrolling view, or keep classic single-page mode.
 - **Save to PDF:** Highlights are optionally saved back into the PDF file. Turning the toggle ON backfills highlights made while it was off; deleting a note removes it from the PDF too.

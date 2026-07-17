@@ -296,8 +296,11 @@ class TestAnnotations(AppTestCase):
         finally:
             main.SketchCanvasDialog.exec = orig
         self.w.pdf.save_now(force=True)
-        self.assertEqual(image_count(self.pdf_path, 0), 1)
+        # Sketch stickies are overlay-only: the PNG lives in the vault and the
+        # PDF is never touched (no embedded image, page text intact).
+        self.assertEqual(image_count(self.pdf_path, 0), 0)
         sk = self.w.annotations[0]
+        self.assertEqual(sk.get("role"), "sketch_sticky")
         self.assertTrue(os.path.exists(sk["img_path"]))
         # click toggles collapsed state (screen-px hit test)
         rc = sk["fitz_rects"][0]
@@ -306,17 +309,13 @@ class TestAnnotations(AppTestCase):
         was = sk["collapsed"]
         self.assertTrue(self.w.handle_sketch_click(pt))
         self.assertNotEqual(sk["collapsed"], was)
-        # delete removes the drawing but MUST keep the underlying page text
-        # (regression: redaction-based cleanup used to wipe textbook content)
+        # delete removes the node; the PDF stays pristine
         self.w.delete_annotation(self.w.tree_widget.topLevelItem(0))
+        self.assertEqual(len(self.w.annotations), 0)
         d = fitz.open(self.pdf_path)
         self.assertIn("hello world", d[0].get_text())
-        # the drawing itself is visually gone: its stroke area renders blank
-        clip = fitz.Rect(rc[0] + 1, rc[1] + 1, rc[0] + 8, rc[1] + 8)
-        pix = d[0].get_pixmap(clip=clip)
-        dark = sum(1 for i in range(0, len(pix.samples), 3) if pix.samples[i] < 100)
+        self.assertEqual(len(d[0].get_images()), 0)
         d.close()
-        self.assertLess(dark, 10)
 
     def test_sketch_png_is_opaque(self):
         """The real save path composites over white so sketches render everywhere
