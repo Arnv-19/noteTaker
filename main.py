@@ -143,6 +143,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction("📖 Open Markdown File…", self.open_markdown_view)
         file_menu.addAction("📝 New Markdown Note…", self.new_markdown_note)
         file_menu.addAction("✏ Edit Markdown Note…", self.edit_markdown_note)
+        file_menu.addAction("🌐 Web Browser", self.open_web_browser)
         file_menu.addSeparator()
         file_menu.addAction("⚙ Set Vault Folder…", self.set_vault)
         file_menu.addSeparator()
@@ -160,6 +161,11 @@ class MainWindow(QMainWindow):
         self.vault_toggle_action.setCheckable(True)
         self.vault_toggle_action.toggled.connect(self.toggle_vault_panel)
         toolbar.addAction(self.vault_toggle_action)
+
+        web_action = QAction("🌐", self)
+        web_action.setToolTip("Open a web browser tab (search, clip screenshots to notes)")
+        web_action.triggered.connect(self.open_web_browser)
+        toolbar.addAction(web_action)
 
         toolbar.addSeparator()
 
@@ -1943,7 +1949,7 @@ class MainWindow(QMainWindow):
         if self.center_stack.currentWidget() is self.notes_tabs:
             block = item.data(0, Qt.ItemDataRole.UserRole)
             w = self.notes_tabs.currentWidget()
-            if block is not None and w is not None:
+            if block is not None and isinstance(w, MarkdownEditorWidget):
                 w.goto_block(block)
             return
         page = item.data(0, Qt.ItemDataRole.UserRole)
@@ -2803,10 +2809,10 @@ class MainWindow(QMainWindow):
         """Outline tab shows the PDF's TOC, or the active note's headings."""
         if self.center_stack.currentWidget() is self.notes_tabs:
             w = self.notes_tabs.currentWidget()
-            if w is not None:
+            if isinstance(w, MarkdownEditorWidget):
                 self.build_note_outline(w)
             else:
-                self.outline_widget.clear()
+                self.outline_widget.clear()  # e.g. a browser tab
         else:
             self.load_toc()
 
@@ -2861,6 +2867,24 @@ class MainWindow(QMainWindow):
         idx = self.notes_tabs.indexOf(widget)
         if idx >= 0:
             self.notes_tabs.setTabText(idx, f"📝 {text}")
+
+    def _update_browser_tab(self, widget, text):
+        idx = self.notes_tabs.indexOf(widget)
+        if idx >= 0:
+            self.notes_tabs.setTabText(idx, f"🌐 {text}")
+
+    def open_web_browser(self):
+        try:
+            page = WebBrowserWidget(self)
+        except Exception as e:
+            QMessageBox.critical(self, "Browser unavailable",
+                                 f"Could not open the web browser:\n{e}")
+            return
+        idx = self.notes_tabs.addTab(page, "🌐 Web")
+        self.notes_tabs.setCurrentIndex(idx)
+        self.show_notes_center()
+        self.vault_toggle_action.setChecked(False)
+        page.url_bar.setFocus()
 
     def on_note_tab_close(self, idx):
         w = self.notes_tabs.widget(idx)
@@ -3104,7 +3128,12 @@ def note_md_to_html(raw, base_dir, vault_path, theme_name):
         ext = os.path.splitext(name)[1].lower()
         url = _resolve_media_url(name, base_dir, vault_path)
         if ext in VIDEO_EXTS:
-            media.append(f'<video controls preload="metadata" src="{url}"></video>')
+            media.append(
+                f'<video controls preload="metadata" src="{url}" '
+                f'onerror="this.insertAdjacentHTML(\'afterend\','
+                f'\'<div style=&quot;opacity:.7;font-size:13px&quot;>⚠ '
+                f'{os.path.basename(name)} — this format needs an external player '
+                f'(Qt has no H.264/MP4 codec)</div>\')"></video>')
             return f"\n\nMEDIATOKEN{len(media) - 1}ENDTOKEN\n\n"
         if ext in AUDIO_EXTS:
             media.append(f'<audio controls preload="metadata" src="{url}"></audio>')
@@ -3164,19 +3193,40 @@ def note_md_to_html(raw, base_dir, vault_path, theme_name):
 </style></head><body>{inner}</body></html>"""
 
 
+def open_in_system_player(path):
+    """Open a file in the OS default app (VLC/Media Player/etc.). Zero in-app
+    CPU and supports every codec — the reliable path for H.264/MP4 lectures
+    that Qt's codec-free Chromium build can't decode."""
+    from PyQt6.QtGui import QDesktopServices
+    QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(path)))
+
+
 class MediaPlayerDialog(QDialog):
-    """Plays a video/audio file (or shows an image) in a themed Chromium view.
-    Lets lecture recordings etc. open straight from the Notes sidebar."""
+    """Plays a video/audio file (or shows an image) in a themed Chromium view,
+    with a one-click fallback to the system player. Opens straight from the
+    Notes sidebar — handy for downloaded lectures."""
 
     def __init__(self, owner, path):
         super().__init__(owner)
+        self.path = path
         self.setWindowTitle(os.path.basename(path))
-        self.resize(960, 620)
+        self.resize(960, 640)
         from PyQt6.QtWebEngineWidgets import QWebEngineView
         from PyQt6.QtWebEngineCore import QWebEngineSettings
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        ext = os.path.splitext(path)[1].lower()
+        if ext in (VIDEO_EXTS | AUDIO_EXTS):
+            bar = QToolBar()
+            act = bar.addAction("▶ Open in system player",
+                                lambda: open_in_system_player(path))
+            act.setToolTip("Play in your default media app — works with every "
+                           "format (e.g. H.264/MP4 that won't play inline here)")
+            layout.addWidget(bar)
+
         self.web = QWebEngineView()
         ws = self.web.settings()
         ws.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
@@ -3184,27 +3234,132 @@ class MediaPlayerDialog(QDialog):
         layout.addWidget(self.web)
 
         url = _file_url(path)
-        ext = os.path.splitext(path)[1].lower()
-        if ext in VIDEO_EXTS:
-            tag = f'<video controls autoplay src="{url}"></video>'
-        elif ext in AUDIO_EXTS:
-            tag = f'<audio controls autoplay src="{url}"></audio>'
-        else:
-            tag = f'<img src="{url}">'
         t = THEMES.get(owner.theme_name, THEMES["AMOLED"])
         bg = "rgb(%d,%d,%d)" % t["window"]
+        fg = "rgb(%d,%d,%d)" % t["text"]
+        if ext in VIDEO_EXTS:
+            # onerror: if the codec isn't supported, guide the user to the button
+            media = (f'<video controls autoplay src="{url}" '
+                     f'onerror="document.getElementById(\'err\').style.display=\'block\'">'
+                     f'</video>'
+                     f'<div id="err" style="display:none;color:{fg};padding:16px;'
+                     f'text-align:center;max-width:480px">⚠ This video format can\'t '
+                     f'play here (Qt ships without H.264/MP4 codecs).<br>'
+                     f'Use <b>▶ Open in system player</b> above.</div>')
+        elif ext in AUDIO_EXTS:
+            media = f'<audio controls autoplay src="{url}"></audio>'
+        else:
+            media = f'<img src="{url}">'
         self.web.setHtml(
             f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>
             html,body {{ margin:0; height:100%; background:{bg};
-              display:flex; align-items:center; justify-content:center; }}
+              display:flex; align-items:center; justify-content:center;
+              flex-direction:column;
+              font-family:-apple-system,'Segoe UI',sans-serif; }}
             video,img {{ max-width:100%; max-height:100vh; }}
             audio {{ width:90%; }}
-            </style></head><body>{tag}</body></html>""",
+            </style></head><body>{media}</body></html>""",
             QUrl.fromLocalFile(os.path.dirname(os.path.abspath(path)) + os.sep))
 
     def closeEvent(self, e):
         self.web.setHtml("")  # stop playback
         e.accept()
+
+
+class WebBrowserWidget(QWidget):
+    """A lightweight in-app browser tab (reuses the WebEngine we already ship).
+    Type a URL or a search; 📸 screenshots the page into a Markdown note.
+    Only spun up on demand, so it costs nothing until you open it."""
+
+    path = None  # so the notes-tab plumbing (dedup, close) treats it uniformly
+
+    def __init__(self, owner, start_url="https://www.google.com"):
+        super().__init__()
+        self.owner = owner
+        from PyQt6.QtWebEngineWidgets import QWebEngineView
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        bar = QToolBar()
+        bar.addAction("◀", lambda: self.web.back()).setToolTip("Back")
+        bar.addAction("▶", lambda: self.web.forward()).setToolTip("Forward")
+        bar.addAction("⟳", lambda: self.web.reload()).setToolTip("Reload")
+        self.url_bar = QLineEdit()
+        self.url_bar.setPlaceholderText("Search Google or type a URL, then Enter…")
+        self.url_bar.returnPressed.connect(self.navigate)
+        bar.addWidget(self.url_bar)
+        bar.addAction("📸 Clip", self.screenshot_to_note).setToolTip(
+            "Screenshot this page into a Markdown note")
+        bar.addAction("🔗 Open externally", self.open_in_system_browser).setToolTip(
+            "Open the current page in your normal browser")
+        root.addWidget(bar)
+
+        self.web = QWebEngineView()
+        self.web.urlChanged.connect(
+            lambda u: self.url_bar.setText(u.toString()))
+        self.web.titleChanged.connect(self._on_title)
+        root.addWidget(self.web)
+        self.web.setUrl(QUrl(start_url))
+
+    def _on_title(self, title):
+        self.owner._update_browser_tab(self, (title or "Web")[:22])
+
+    def navigate(self):
+        text = self.url_bar.text().strip()
+        if not text:
+            return
+        # Looks like a URL? (has scheme, or a dotted host with no spaces)
+        if re.match(r"^[a-zA-Z][\w+.-]*://", text):
+            url = text
+        elif " " not in text and re.search(r"\.[a-zA-Z]{2,}", text):
+            url = "https://" + text
+        else:
+            from urllib.parse import quote_plus
+            url = "https://www.google.com/search?q=" + quote_plus(text)
+        self.web.setUrl(QUrl(url))
+
+    def open_in_system_browser(self):
+        from PyQt6.QtGui import QDesktopServices
+        QDesktopServices.openUrl(self.web.url())
+
+    def screenshot_to_note(self):
+        base = self.owner.notes_root or self.owner.vault_path
+        if not base:
+            QMessageBox.information(
+                self, "Choose a folder first",
+                "Browse a folder or set a vault (🗂 sidebar ▸ 📂) so clips have "
+                "somewhere to be saved.")
+            return
+        att = os.path.join(base, "attachments")
+        os.makedirs(att, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        fname = f"webclip_{stamp}.png"
+        pix = self.web.grab()  # capture the rendered page (visible area)
+        if not pix.save(os.path.join(att, fname), "PNG"):
+            QMessageBox.warning(self, "Screenshot failed", "Could not save the image.")
+            return
+        # Append the clip to a single "Web Clippings.md" note and open it
+        note_path = os.path.join(base, "Web Clippings.md")
+        title = self.web.title() or self.web.url().toString()
+        block = (f"\n## {title}\n\n"
+                 f"<{self.web.url().toString()}>\n\n"
+                 f"![[attachments/{fname}]]\n")
+        header = "" if os.path.exists(note_path) else "# Web Clippings\n"
+        try:
+            with open(note_path, "a", encoding="utf-8") as fh:
+                fh.write(header + block)
+        except Exception as e:
+            QMessageBox.warning(self, "Save failed", str(e))
+            return
+        self.owner.statusBar().showMessage(f"Clipped to Web Clippings.md", 3000)
+        self.owner.refresh_vault_tree()
+        self.owner._open_md_editor(note_path, mode="Preview")
+
+    def maybe_close(self):
+        self.web.setUrl(QUrl("about:blank"))  # stop media/network
+        return True
 
 
 class MarkdownEditorWidget(QWidget):
