@@ -459,6 +459,7 @@ class MainWindow(QMainWindow):
         self.notes_tabs.setDocumentMode(True)
         self.notes_tabs.setMovable(True)
         self.notes_tabs.tabCloseRequested.connect(self.on_note_tab_close)
+        self.notes_tabs.currentChanged.connect(lambda _i: self.refresh_outline())
         self.center_stack.addWidget(self.notes_tabs)
         left_layout.addWidget(self.center_stack)
 
@@ -1939,6 +1940,12 @@ class MainWindow(QMainWindow):
             items_by_level[level] = item
             
     def on_outline_clicked(self, item, column):
+        if self.center_stack.currentWidget() is self.notes_tabs:
+            block = item.data(0, Qt.ItemDataRole.UserRole)
+            w = self.notes_tabs.currentWidget()
+            if block is not None and w is not None:
+                w.goto_block(block)
+            return
         page = item.data(0, Qt.ItemDataRole.UserRole)
         if page is not None:
             # PyMuPDF TOC pages are 1-based usually
@@ -2786,9 +2793,44 @@ class MainWindow(QMainWindow):
 
     def show_pdf_center(self):
         self.center_stack.setCurrentWidget(self.scroll_area)
+        self.refresh_outline()
 
     def show_notes_center(self):
         self.center_stack.setCurrentWidget(self.notes_tabs)
+        self.refresh_outline()
+
+    def refresh_outline(self):
+        """Outline tab shows the PDF's TOC, or the active note's headings."""
+        if self.center_stack.currentWidget() is self.notes_tabs:
+            w = self.notes_tabs.currentWidget()
+            if w is not None:
+                self.build_note_outline(w)
+            else:
+                self.outline_widget.clear()
+        else:
+            self.load_toc()
+
+    def build_note_outline(self, widget):
+        self.outline_widget.clear()
+        items_by_level = {}
+        found = False
+        for i, line in enumerate(widget.editor.toPlainText().split("\n")):
+            mm = re.match(r"^(#{1,6})\s+(.*)$", line)
+            if not mm:
+                continue
+            found = True
+            level = len(mm.group(1))
+            item = QTreeWidgetItem([mm.group(2).strip() or "(untitled)"])
+            item.setData(0, Qt.ItemDataRole.UserRole, i)  # editor line/block number
+            parent = next((items_by_level[lv] for lv in range(level - 1, 0, -1)
+                           if lv in items_by_level), None)
+            (parent.addChild if parent else self.outline_widget.addTopLevelItem)(item)
+            items_by_level[level] = item
+            for lv in [lv for lv in items_by_level if lv > level]:
+                del items_by_level[lv]
+        if not found:
+            self.outline_widget.addTopLevelItem(QTreeWidgetItem(["(no headings yet)"]))
+        self.outline_widget.expandAll()
 
     def _open_md_editor(self, path=None, mode="Split"):
         """Open a note as a tab in the middle area (like PDFs). If the file
@@ -3290,6 +3332,23 @@ class MarkdownEditorWidget(QWidget):
         html = note_md_to_html(self.editor.toPlainText(), self._base_dir(),
                                self.owner.vault_path, self.owner.theme_name)
         self.web.setHtml(html, QUrl.fromLocalFile(self._base_dir() + os.sep))
+        # Keep the Outline panel in sync with this note's headings
+        if getattr(self.owner, "notes_tabs", None) is not None \
+                and self.owner.notes_tabs.currentWidget() is self:
+            self.owner.refresh_outline()
+
+    def goto_block(self, block_no):
+        """Scroll the editor to a heading line (from the Outline panel)."""
+        if not self.editor.isVisible():
+            self.mode_combo.setCurrentText("Split")
+        block = self.editor.document().findBlockByNumber(block_no)
+        if not block.isValid():
+            return
+        c = self.editor.textCursor()
+        c.setPosition(block.position())
+        self.editor.setTextCursor(c)
+        self.editor.centerCursor()
+        self.editor.setFocus()
 
     def set_mode(self, mode):
         self.editor.setVisible(mode in ("Split", "Editor"))
