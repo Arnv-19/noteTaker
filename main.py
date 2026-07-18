@@ -3028,6 +3028,13 @@ def _strip_frontmatter(text):
     return text
 
 
+def _file_url(path):
+    """Absolute, percent-encoded file:// URL. Encoding matters: markdown and
+    HTML both choke on raw spaces in paths like 'Textbooks notes/IMG 1.JPG'."""
+    return QUrl.fromLocalFile(os.path.abspath(path)).toString(
+        QUrl.ComponentFormattingOption.FullyEncoded)
+
+
 def _resolve_media_url(name, base_dir, vault_path):
     """Resolve a vault-relative media reference to an absolute file:// URL."""
     name = name.split("|")[0].strip()
@@ -3039,9 +3046,9 @@ def _resolve_media_url(name, base_dir, vault_path):
     for root in roots:
         cand = os.path.join(root, name)
         if os.path.isfile(cand):
-            return QUrl.fromLocalFile(os.path.abspath(cand)).toString()
+            return _file_url(cand)
     # Not found — still hand back a file URL relative to the note's folder
-    return QUrl.fromLocalFile(os.path.abspath(os.path.join(base_dir, name))).toString()
+    return _file_url(os.path.join(base_dir, name))
 
 
 def note_md_to_html(raw, base_dir, vault_path, theme_name):
@@ -3134,7 +3141,7 @@ class MediaPlayerDialog(QDialog):
         ws.setAttribute(QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, False)
         layout.addWidget(self.web)
 
-        url = QUrl.fromLocalFile(os.path.abspath(path)).toString()
+        url = _file_url(path)
         ext = os.path.splitext(path)[1].lower()
         if ext in VIDEO_EXTS:
             tag = f'<video controls autoplay src="{url}"></video>'
@@ -3413,6 +3420,12 @@ class MarkdownEditorWidget(QWidget):
             flt = "Videos (*.mp4 *.webm *.mov *.mkv *.m4v *.ogv)"
         src, _ = QFileDialog.getOpenFileName(self, f"Insert {kind}", base, flt)
         if not src:
+            return
+        # Already inside the note's folder tree? Reference it in place —
+        # no copy into attachments/ needed.
+        rel = os.path.relpath(os.path.abspath(src), os.path.abspath(base))
+        if not rel.startswith(".."):
+            self.editor.insertPlainText(f"\n![[{rel.replace(os.sep, '/')}]]\n")
             return
         att = os.path.join(base, "attachments")
         try:
