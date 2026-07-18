@@ -642,22 +642,14 @@ class MainWindow(QMainWindow):
 
     def _pomo_context_menu(self, pos):
         menu = QMenu(self)
-        # Mode switch
         if self._pomo_mode == "pomodoro":
-            menu.addAction("Mode: Pomodoro").setEnabled(False)
             menu.addAction("Switch to Stopwatch", self._pomo_switch_stopwatch)
-        else:
-            menu.addAction("Mode: Stopwatch").setEnabled(False)
-            menu.addAction("Switch to Pomodoro", self._pomo_switch_pomodoro)
-        menu.addSeparator()
-        if self._pomo_mode == "pomodoro":
-            menu.addAction(f"Focus: {self._pomo_focus_min} min").setEnabled(False)
-            menu.addAction(f"Break: {self._pomo_break_min} min").setEnabled(False)
-            menu.addAction(f"Long break: {self._pomo_long_break_min} min").setEnabled(False)
             menu.addSeparator()
-            menu.addAction("Set Focus Time...", self._pomo_set_focus)
-            menu.addAction("Set Break Time...", self._pomo_set_break)
-            menu.addAction("Set Long Break Time...", self._pomo_set_long_break)
+            menu.addAction(f"Focus \u2014 {self._pomo_focus_min} min", self._pomo_set_focus)
+            menu.addAction(f"Break \u2014 {self._pomo_break_min} min", self._pomo_set_break)
+            menu.addAction(f"Long Break \u2014 {self._pomo_long_break_min} min", self._pomo_set_long_break)
+        else:
+            menu.addAction("Switch to Pomodoro", self._pomo_switch_pomodoro)
         menu.exec(self.pomo_label.mapToGlobal(pos))
 
     def _pomo_switch_stopwatch(self):

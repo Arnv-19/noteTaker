@@ -16,7 +16,7 @@ THEMES = {
         "button_text": (192, 210, 225), "bright": (127, 9, 9),
         "highlight": (13, 107, 61), "highlight_text": (240, 240, 240),
     },
-    "Purple": {
+    "Amethyst": {
         "window": (15, 10, 26), "window_text": (210, 200, 230),
         "base": (26, 18, 48), "alt_base": (15, 10, 26),
         "text": (210, 200, 230), "button": (26, 18, 48),
