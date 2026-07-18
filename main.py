@@ -91,7 +91,7 @@ class MainWindow(QMainWindow):
         self.vault_path = ""
         self.night_mode = False
         self.save_to_pdf_mode = True
-        self.theme_name = "Dark Black"
+        self.theme_name = "AMOLED"
         self.recent_files = []
         self.bookmarks = {}  # {pdf_path: page_idx}
         self.screenshot_counter = 0
@@ -258,6 +258,47 @@ class MainWindow(QMainWindow):
         toggle_layout.addWidget(self.save_pdf_switch)
         toolbar.addWidget(toggle_widget)
 
+        # ── Pomodoro Timer ──
+        toolbar.addSeparator()
+        pomo_widget = QWidget()
+        pomo_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        pomo_widget.customContextMenuRequested.connect(self._pomo_context_menu)
+        pomo_layout = QHBoxLayout(pomo_widget)
+        pomo_layout.setContentsMargins(4, 0, 4, 0)
+        pomo_layout.setSpacing(4)
+
+        self.pomo_label = QLabel("25:00")
+        self.pomo_label.setToolTip("Timer  |  Right-click for options")
+        self.pomo_label.setStyleSheet("font-weight: bold; font-size: 13px;")
+        pomo_layout.addWidget(self.pomo_label)
+
+        self.pomo_start_btn = QPushButton("▶")
+        self.pomo_start_btn.setFixedSize(26, 26)
+        self.pomo_start_btn.setToolTip("Start / Pause")
+        self.pomo_start_btn.clicked.connect(self.pomo_toggle)
+        pomo_layout.addWidget(self.pomo_start_btn)
+
+        self.pomo_reset_btn = QPushButton("⟲")
+        self.pomo_reset_btn.setFixedSize(26, 26)
+        self.pomo_reset_btn.setToolTip("Reset timer")
+        self.pomo_reset_btn.clicked.connect(self.pomo_reset)
+        pomo_layout.addWidget(self.pomo_reset_btn)
+
+        toolbar.addWidget(pomo_widget)
+
+        # Timer state
+        self._pomo_mode = "pomodoro"      # pomodoro / stopwatch
+        self._pomo_focus_min = 25
+        self._pomo_break_min = 5
+        self._pomo_long_break_min = 15
+        self._pomo_seconds = self._pomo_focus_min * 60
+        self._pomo_running = False
+        self._pomo_phase = "focus"       # focus / break / long_break
+        self._pomo_count = 0             # completed pomodoros
+        self._pomo_timer = QTimer(self)
+        self._pomo_timer.setInterval(1000)
+        self._pomo_timer.timeout.connect(self._pomo_tick)
+
         # Spacer pushes view controls to the right edge
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -323,7 +364,7 @@ class MainWindow(QMainWindow):
         
         # Search Bar UI (hidden by default)
         self.search_bar_widget = QWidget()
-        self.search_bar_widget.setStyleSheet("background: #24283b; border-bottom: 1px solid #1a1b26;")
+        self.search_bar_widget.setStyleSheet("border-bottom: 1px solid rgba(255,255,255,15);")
         search_layout = QHBoxLayout(self.search_bar_widget)
         search_layout.setContentsMargins(10, 5, 10, 5)
         
@@ -368,7 +409,7 @@ class MainWindow(QMainWindow):
         annot_layout.setContentsMargins(5, 5, 5, 5)
         
         self.context_label = QLabel("Context: Root")
-        self.context_label.setStyleSheet("font-weight: bold; color: #bb9af7;")
+        self.context_label.setStyleSheet("font-weight: bold;")
         annot_layout.addWidget(self.context_label)
 
         # Annotation filter/search box
@@ -467,7 +508,7 @@ class MainWindow(QMainWindow):
                 self.vault_path = data.get("vault_path", "")
                 self.recent_files = data.get("recent_files", [])
                 self.bookmarks = data.get("bookmarks", {})
-                self.theme_name = data.get("theme", "Dark Black")
+                self.theme_name = data.get("theme", "AMOLED")
                 self.night_mode = data.get("night_mode", False)
                 self.save_to_pdf_mode = data.get("save_to_pdf_mode", True)
                 self.highlight_color_name = data.get("highlight_color", "Yellow")
@@ -532,6 +573,120 @@ class MainWindow(QMainWindow):
         self.theme_name = name
         apply_theme(QApplication.instance(), name)
         self.save_settings()
+
+    # ── Timer (Pomodoro + Stopwatch) ────────────────────────────────────────
+    def pomo_toggle(self):
+        if self._pomo_running:
+            self._pomo_timer.stop()
+            self._pomo_running = False
+            self.pomo_start_btn.setText("▶")
+        else:
+            self._pomo_timer.start()
+            self._pomo_running = True
+            self.pomo_start_btn.setText("⏸")
+
+    def pomo_reset(self):
+        self._pomo_timer.stop()
+        self._pomo_running = False
+        self.pomo_start_btn.setText("▶")
+        self.pomo_label.setStyleSheet("font-weight: bold; font-size: 13px;")
+        if self._pomo_mode == "stopwatch":
+            self._pomo_seconds = 0
+            self.pomo_label.setText("00:00")
+        else:
+            self._pomo_phase = "focus"
+            self._pomo_seconds = self._pomo_focus_min * 60
+            self._pomo_count = 0
+            self.pomo_label.setText(f"{self._pomo_focus_min:02d}:00")
+
+    def _pomo_tick(self):
+        if self._pomo_mode == "stopwatch":
+            self._pomo_seconds += 1
+            hrs, rem = divmod(self._pomo_seconds, 3600)
+            mins, secs = divmod(rem, 60)
+            if hrs > 0:
+                self.pomo_label.setText(f"{hrs}:{mins:02d}:{secs:02d}")
+            else:
+                self.pomo_label.setText(f"{mins:02d}:{secs:02d}")
+            return
+
+        # Pomodoro countdown
+        self._pomo_seconds -= 1
+        mins, secs = divmod(self._pomo_seconds, 60)
+        self.pomo_label.setText(f"{mins:02d}:{secs:02d}")
+
+        if self._pomo_seconds <= 0:
+            self._pomo_timer.stop()
+            self._pomo_running = False
+            self.pomo_start_btn.setText("▶")
+            if self._pomo_phase == "focus":
+                self._pomo_count += 1
+                if self._pomo_count % 4 == 0:
+                    self._pomo_phase = "long_break"
+                    self._pomo_seconds = self._pomo_long_break_min * 60
+                    self.pomo_label.setText(f"{self._pomo_long_break_min:02d}:00")
+                    self.pomo_label.setStyleSheet("font-weight: bold; font-size: 13px; color: #e0af68;")
+                    QMessageBox.information(self, "Pomodoro", f"{self._pomo_count} pomodoros done!\nLong break ({self._pomo_long_break_min} min).")
+                else:
+                    self._pomo_phase = "break"
+                    self._pomo_seconds = self._pomo_break_min * 60
+                    self.pomo_label.setText(f"{self._pomo_break_min:02d}:00")
+                    self.pomo_label.setStyleSheet("font-weight: bold; font-size: 13px; color: #9ece6a;")
+                    QMessageBox.information(self, "Pomodoro", f"Focus done! Break ({self._pomo_break_min} min).")
+            else:
+                self._pomo_phase = "focus"
+                self._pomo_seconds = self._pomo_focus_min * 60
+                self.pomo_label.setText(f"{self._pomo_focus_min:02d}:00")
+                self.pomo_label.setStyleSheet("font-weight: bold; font-size: 13px;")
+                QMessageBox.information(self, "Pomodoro", "Break over! Ready to focus.")
+
+    def _pomo_context_menu(self, pos):
+        menu = QMenu(self)
+        # Mode switch
+        if self._pomo_mode == "pomodoro":
+            menu.addAction("Mode: Pomodoro").setEnabled(False)
+            menu.addAction("Switch to Stopwatch", self._pomo_switch_stopwatch)
+        else:
+            menu.addAction("Mode: Stopwatch").setEnabled(False)
+            menu.addAction("Switch to Pomodoro", self._pomo_switch_pomodoro)
+        menu.addSeparator()
+        if self._pomo_mode == "pomodoro":
+            menu.addAction(f"Focus: {self._pomo_focus_min} min").setEnabled(False)
+            menu.addAction(f"Break: {self._pomo_break_min} min").setEnabled(False)
+            menu.addAction(f"Long break: {self._pomo_long_break_min} min").setEnabled(False)
+            menu.addSeparator()
+            menu.addAction("Set Focus Time...", self._pomo_set_focus)
+            menu.addAction("Set Break Time...", self._pomo_set_break)
+            menu.addAction("Set Long Break Time...", self._pomo_set_long_break)
+        menu.exec(self.pomo_label.mapToGlobal(pos))
+
+    def _pomo_switch_stopwatch(self):
+        self._pomo_mode = "stopwatch"
+        self.pomo_reset()
+
+    def _pomo_switch_pomodoro(self):
+        self._pomo_mode = "pomodoro"
+        self.pomo_reset()
+
+    def _pomo_set_focus(self):
+        val, ok = QInputDialog.getInt(self, "Focus Time", "Focus duration (minutes):", self._pomo_focus_min, 1, 120)
+        if ok:
+            self._pomo_focus_min = val
+            self.pomo_reset()
+
+    def _pomo_set_break(self):
+        val, ok = QInputDialog.getInt(self, "Break Time", "Break duration (minutes):", self._pomo_break_min, 1, 60)
+        if ok:
+            self._pomo_break_min = val
+            if self._pomo_phase == "break":
+                self.pomo_reset()
+
+    def _pomo_set_long_break(self):
+        val, ok = QInputDialog.getInt(self, "Long Break Time", "Long break duration (minutes):", self._pomo_long_break_min, 1, 60)
+        if ok:
+            self._pomo_long_break_min = val
+            if self._pomo_phase == "long_break":
+                self.pomo_reset()
 
     # ── Night Mode & PDF Save ────────────────────────────────────────────────
     def toggle_night_mode(self, checked):
@@ -2509,7 +2664,7 @@ if __name__ == "__main__":
     sys.excepthook = global_exception_handler
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    apply_theme(app, "Dark Black")
+    apply_theme(app, "AMOLED")
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
