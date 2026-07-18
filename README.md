@@ -24,6 +24,7 @@ A beautiful, lightweight, and highly customizable PDF annotator built specifical
 - **Rich Annotations:** Headers (H1-H4) with live child-count badges, highlights, notes, stickies, and image snippets.
 - **Customizable Shortcuts:** Bind any tool to any key sequence through the built-in Shortcut Editor.
 - **Session Restoration:** Load an existing Markdown session to rebuild your annotation tree.
+- **Markdown Viewer:** Open and read any `.md` note from your Obsidian vault as formatted rich text — headings, quotes, notes, and embedded images render inline (no PDF required).
 - **Table of Contents:** Quick navigation through the built-in PDF outline.
 
 ## Easy Setup for New Users

@@ -23,8 +23,9 @@ from PyQt6.QtWidgets import (
     QLabel, QScrollArea, QSplitter, QToolBar, QInputDialog,
     QMessageBox, QLineEdit, QMenu, QDialog, QGridLayout, QComboBox,
     QTabWidget, QCheckBox, QKeySequenceEdit, QWidgetAction, QSizePolicy,
-    QAbstractItemView, QTabBar
+    QAbstractItemView, QTabBar, QTextBrowser
 )
+import re
 from PyQt6.QtCore import Qt, QRect, QPoint, QSize, QTimer
 from PyQt6.QtGui import (QPixmap, QImage, QAction, QKeySequence, QShortcut,
                          QColor, QPainter, QPen, QTextDocument, QPdfWriter, QIcon)
@@ -136,6 +137,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction("📂 Open PDF…", self.open_pdf)
         self.recent_menu_action = file_menu.addAction("📋 Recent Files", self.show_recent_files)
         file_menu.addAction("📄 Load Markdown Session…", self.load_markdown)
+        file_menu.addAction("📖 Open Markdown File…", self.open_markdown_view)
         file_menu.addSeparator()
         file_menu.addAction("⚙ Set Vault Folder…", self.set_vault)
         file_menu.addSeparator()
@@ -2634,6 +2636,80 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             self.statusBar().showMessage(f"Error loading: {e}", 5000)
+
+    def _md_for_display(self, raw):
+        """Convert app/Obsidian-flavored markdown into Qt-renderable markdown:
+        drop YAML frontmatter, turn ![[embeds]] into standard images, and
+        flatten `> [!type] title` callout headers into a bold quote line."""
+        text = raw
+
+        # Strip a leading YAML frontmatter block (--- ... ---)
+        if text.lstrip().startswith("---"):
+            lines = text.split("\n")
+            start = next(i for i, l in enumerate(lines) if l.strip() == "---")
+            end = None
+            for i in range(start + 1, len(lines)):
+                if lines[i].strip() == "---":
+                    end = i
+                    break
+            if end is not None:
+                text = "\n".join(lines[end + 1:]).lstrip("\n")
+
+        # Obsidian embeds: ![[path|size]] -> ![](path)
+        def _embed(m):
+            inner = m.group(1).split("|")[0].strip()
+            return f"![]({inner})"
+        text = re.sub(r"!\[\[([^\]]+)\]\]", _embed, text)
+
+        # Callout headers: `> [!quote] p.5` -> `> **p.5**`
+        out = []
+        for line in text.split("\n"):
+            m = re.match(r"^(\s*>+\s*)\[!(\w+)\]\s*(.*)$", line)
+            if m:
+                prefix, ctype, title = m.group(1), m.group(2), m.group(3).strip()
+                out.append(f"{prefix}**{title or ctype.capitalize()}**")
+            else:
+                out.append(line)
+        return "\n".join(out)
+
+    def open_markdown_view(self):
+        start_dir = self.vault_path or os.path.expanduser("~")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open Markdown File", start_dir,
+            "Markdown Files (*.md *.markdown);;All Files (*)")
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                raw = f.read()
+        except Exception as e:
+            self.statusBar().showMessage(f"Error opening: {e}", 5000)
+            return
+
+        base_dir = os.path.dirname(os.path.abspath(path))
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"📖 {os.path.basename(path)}")
+        dlg.resize(820, 900)
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        browser = QTextBrowser(dlg)
+        browser.setOpenExternalLinks(True)
+        # Resolve relative image paths (e.g. attachments/x.png) against the file
+        browser.setSearchPaths([base_dir, os.path.join(base_dir, "attachments")])
+        browser.setMarkdown(self._md_for_display(raw))
+        layout.addWidget(browser)
+
+        bar = QHBoxLayout()
+        bar.setContentsMargins(8, 6, 8, 8)
+        bar.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dlg.accept)
+        bar.addWidget(close_btn)
+        layout.addLayout(bar)
+
+        self.statusBar().showMessage(f"Viewing {os.path.basename(path)}", 3000)
+        dlg.exec()
 
     def closeEvent(self, event):
         self.pdf.flush()
