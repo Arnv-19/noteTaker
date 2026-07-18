@@ -2800,6 +2800,7 @@ class MainWindow(QMainWindow):
                 if w.path and os.path.abspath(w.path) == ap:
                     self.notes_tabs.setCurrentIndex(i)
                     self.show_notes_center()
+                    self.vault_toggle_action.setChecked(False)
                     return
         try:
             page = MarkdownEditorWidget(self, path, start_mode=mode)
@@ -2811,6 +2812,8 @@ class MainWindow(QMainWindow):
         idx = self.notes_tabs.addTab(page, f"📝 {name}")
         self.notes_tabs.setCurrentIndex(idx)
         self.show_notes_center()
+        # Collapse the sidebar so the note gets the full width; 🗂 re-opens it
+        self.vault_toggle_action.setChecked(False)
 
     def _update_note_tab(self, widget, text):
         idx = self.notes_tabs.indexOf(widget)
