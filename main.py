@@ -23,12 +23,14 @@ from PyQt6.QtWidgets import (
     QLabel, QScrollArea, QSplitter, QToolBar, QInputDialog,
     QMessageBox, QLineEdit, QMenu, QDialog, QGridLayout, QComboBox,
     QTabWidget, QCheckBox, QKeySequenceEdit, QWidgetAction, QSizePolicy,
-    QAbstractItemView, QTabBar, QTextBrowser
+    QAbstractItemView, QTabBar, QTextBrowser, QPlainTextEdit
 )
 import re
-from PyQt6.QtCore import Qt, QRect, QPoint, QSize, QTimer
+import shutil
+from PyQt6.QtCore import Qt, QRect, QPoint, QSize, QTimer, QUrl
 from PyQt6.QtGui import (QPixmap, QImage, QAction, QKeySequence, QShortcut,
-                         QColor, QPainter, QPen, QTextDocument, QPdfWriter, QIcon)
+                         QColor, QPainter, QPen, QTextDocument, QPdfWriter, QIcon,
+                         QFont)
 
 from theme import (THEMES, apply_theme, HIGHLIGHT_COLORS, PEN_COLORS,
                    hl_qcolor, pen_qcolor)
@@ -138,6 +140,8 @@ class MainWindow(QMainWindow):
         self.recent_menu_action = file_menu.addAction("📋 Recent Files", self.show_recent_files)
         file_menu.addAction("📄 Load Markdown Session…", self.load_markdown)
         file_menu.addAction("📖 Open Markdown File…", self.open_markdown_view)
+        file_menu.addAction("📝 New Markdown Note…", self.new_markdown_note)
+        file_menu.addAction("✏ Edit Markdown Note…", self.edit_markdown_note)
         file_menu.addSeparator()
         file_menu.addAction("⚙ Set Vault Folder…", self.set_vault)
         file_menu.addSeparator()
@@ -2711,6 +2715,33 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Viewing {os.path.basename(path)}", 3000)
         dlg.exec()
 
+    def _open_md_editor(self, path=None):
+        """Open the Obsidian-style Markdown editor (non-modal). Keeps a
+        reference so multiple note windows can stay open alongside the PDF."""
+        try:
+            dlg = MarkdownEditorDialog(self, path)
+        except Exception as e:
+            QMessageBox.critical(self, "Editor unavailable",
+                                 f"Could not open the Markdown editor:\n{e}")
+            return
+        if not hasattr(self, "_md_editors"):
+            self._md_editors = []
+        self._md_editors = [d for d in self._md_editors if d.isVisible()]
+        self._md_editors.append(dlg)
+        dlg.show()
+        dlg.raise_()
+
+    def new_markdown_note(self):
+        self._open_md_editor(None)
+
+    def edit_markdown_note(self):
+        start = self.vault_path or os.path.expanduser("~")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Edit Markdown File", start,
+            "Markdown Files (*.md *.markdown);;All Files (*)")
+        if path:
+            self._open_md_editor(path)
+
     def closeEvent(self, event):
         self.pdf.flush()
         self.save_bookmark()
@@ -2726,6 +2757,268 @@ class MainWindow(QMainWindow):
         event.accept()
 
 
+# ── Obsidian-style Markdown → HTML (for the WebEngine note preview) ───────────
+VIDEO_EXTS = {".mp4", ".webm", ".ogv", ".mov", ".mkv", ".m4v"}
+AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".flac", ".aac", ".oga", ".ogg"}
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".svg", ".webp", ".avif"}
+
+
+def _strip_frontmatter(text):
+    if text.lstrip().startswith("---"):
+        lines = text.split("\n")
+        start = next(i for i, l in enumerate(lines) if l.strip() == "---")
+        for i in range(start + 1, len(lines)):
+            if lines[i].strip() == "---":
+                return "\n".join(lines[i + 1:]).lstrip("\n")
+    return text
+
+
+def _resolve_media_url(name, base_dir, vault_path):
+    """Resolve a vault-relative media reference to an absolute file:// URL."""
+    name = name.split("|")[0].strip()
+    if name.startswith(("http://", "https://", "file:", "data:")):
+        return name
+    roots = [base_dir, os.path.join(base_dir, "attachments")]
+    if vault_path:
+        roots += [vault_path, os.path.join(vault_path, "attachments")]
+    for root in roots:
+        cand = os.path.join(root, name)
+        if os.path.isfile(cand):
+            return QUrl.fromLocalFile(os.path.abspath(cand)).toString()
+    # Not found — still hand back a file URL relative to the note's folder
+    return QUrl.fromLocalFile(os.path.abspath(os.path.join(base_dir, name))).toString()
+
+
+def note_md_to_html(raw, base_dir, vault_path, theme_name):
+    """Render app/Obsidian-flavored markdown to a full themed HTML document.
+    Images embed inline; video/audio become real playable HTML5 players."""
+    text = _strip_frontmatter(raw)
+    media = []  # collected <video>/<audio> tags, referenced by token
+
+    def wiki(m):
+        name = m.group(1).split("|")[0].strip()
+        ext = os.path.splitext(name)[1].lower()
+        url = _resolve_media_url(name, base_dir, vault_path)
+        if ext in VIDEO_EXTS:
+            media.append(f'<video controls preload="metadata" src="{url}"></video>')
+            return f"\n\nMEDIATOKEN{len(media) - 1}ENDTOKEN\n\n"
+        if ext in AUDIO_EXTS:
+            media.append(f'<audio controls preload="metadata" src="{url}"></audio>')
+            return f"\n\nMEDIATOKEN{len(media) - 1}ENDTOKEN\n\n"
+        # Qt's markdown parser drops images with empty alt text — always supply one
+        return f"![{os.path.basename(name)}]({url})"
+    text = re.sub(r"!\[\[([^\]]+)\]\]", wiki, text)
+
+    # Standard markdown images with local paths -> resolved file URLs
+    def img(m):
+        alt = m.group(1).strip() or os.path.basename(m.group(2).strip())
+        return f"![{alt}]({_resolve_media_url(m.group(2).strip(), base_dir, vault_path)})"
+    text = re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", img, text)
+
+    # Flatten Obsidian callout headers: `> [!quote] p.5` -> `> **p.5**`
+    out = []
+    for line in text.split("\n"):
+        cm = re.match(r"^(\s*>+\s*)\[!(\w+)\]\s*(.*)$", line)
+        out.append(f"{cm.group(1)}**{cm.group(3).strip() or cm.group(2).capitalize()}**"
+                   if cm else line)
+    text = "\n".join(out)
+
+    # Reuse Qt's robust markdown parser for the text/image body
+    doc = QTextDocument()
+    doc.setMarkdown(text, QTextDocument.MarkdownFeature.MarkdownDialectGitHub)
+    body_html = doc.toHtml()
+    bm = re.search(r"<body[^>]*>(.*)</body>", body_html, re.S)
+    inner = bm.group(1) if bm else body_html
+    for i, tag in enumerate(media):
+        inner = inner.replace(f"MEDIATOKEN{i}ENDTOKEN", tag)
+
+    t = THEMES.get(theme_name, THEMES["AMOLED"])
+    bg = "rgb(%d,%d,%d)" % t["window"]
+    fg = "rgb(%d,%d,%d)" % t["text"]
+    accent = "rgb(%d,%d,%d)" % t["bright"]
+    border = "rgba(%d,%d,%d,0.25)" % t["text"]
+    soft = "rgba(127,127,127,0.12)"
+    return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+<style>
+  html,body {{ margin:0; padding:26px 30px; background:{bg}; color:{fg};
+    font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+    font-size:16px; line-height:1.65; }}
+  img,video,audio {{ max-width:100%; border-radius:8px; }}
+  video,audio {{ width:100%; margin:10px 0; display:block; }}
+  a {{ color:{accent}; text-decoration:none; }}
+  a:hover {{ text-decoration:underline; }}
+  h1,h2,h3,h4 {{ line-height:1.3; margin:1.1em 0 0.5em; }}
+  blockquote {{ border-left:3px solid {accent}; margin:10px 0; padding:6px 16px;
+    background:{soft}; border-radius:4px; }}
+  pre {{ background:{soft}; padding:12px 14px; border-radius:8px; overflow:auto; }}
+  code {{ background:{soft}; padding:2px 6px; border-radius:4px;
+    font-family:Consolas,'Courier New',monospace; }}
+  pre code {{ padding:0; background:none; }}
+  table {{ border-collapse:collapse; margin:10px 0; }}
+  th,td {{ border:1px solid {border}; padding:6px 12px; }}
+  hr {{ border:none; border-top:1px solid {border}; margin:18px 0; }}
+</style></head><body>{inner}</body></html>"""
+
+
+class MarkdownEditorDialog(QDialog):
+    """A create/edit Markdown note window with a live Obsidian-style preview
+    (images + playable video) powered by QtWebEngine."""
+
+    def __init__(self, owner, path=None):
+        super().__init__(owner)
+        self.owner = owner
+        self.path = path
+        self._dirty = False
+        self.resize(1160, 840)
+
+        # Lazy import keeps Chromium out of app startup and the PDF workflow
+        from PyQt6.QtWebEngineWidgets import QWebEngineView
+        from PyQt6.QtWebEngineCore import QWebEngineSettings
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+
+        bar = QToolBar()
+        bar.addAction("💾 Save", self.save)
+        bar.addAction("Save As…", self.save_as)
+        bar.addSeparator()
+        bar.addAction("🖼 Image", lambda: self.insert_media("image"))
+        bar.addAction("🎬 Video", lambda: self.insert_media("video"))
+        bar.addSeparator()
+        bar.addWidget(QLabel(" View "))
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(["Split", "Editor", "Preview"])
+        self.mode_combo.currentTextChanged.connect(self.set_mode)
+        bar.addWidget(self.mode_combo)
+        root.addWidget(bar)
+
+        self.split = QSplitter(Qt.Orientation.Horizontal)
+        self.editor = QPlainTextEdit()
+        self.editor.setPlaceholderText("# Write your note in Markdown…\n\n"
+                                       "Use 🖼 / 🎬 to embed images and video.")
+        mono = QFont("Consolas")
+        mono.setStyleHint(QFont.StyleHint.Monospace)
+        mono.setPointSize(11)
+        self.editor.setFont(mono)
+
+        self.web = QWebEngineView()
+        ws = self.web.settings()
+        ws.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
+        ws.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
+        ws.setAttribute(QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, False)
+
+        self.split.addWidget(self.editor)
+        self.split.addWidget(self.web)
+        self.split.setSizes([500, 660])
+        root.addWidget(self.split, 1)
+
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(350)
+        self._timer.timeout.connect(self.refresh_preview)
+        self.editor.textChanged.connect(self._on_changed)
+
+        if path and os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    self.editor.setPlainText(fh.read())
+            except Exception as e:
+                QMessageBox.warning(self, "Open failed", str(e))
+            self._dirty = False
+        self._update_title()
+        self.refresh_preview()
+
+    def _update_title(self):
+        name = os.path.basename(self.path) if self.path else "Untitled"
+        self.setWindowTitle(f"📝 {name}{'  •' if self._dirty else ''}")
+
+    def _base_dir(self):
+        if self.path:
+            return os.path.dirname(os.path.abspath(self.path))
+        return self.owner.vault_path or os.path.expanduser("~")
+
+    def _on_changed(self):
+        self._dirty = True
+        self._update_title()
+        self._timer.start()
+
+    def refresh_preview(self):
+        html = note_md_to_html(self.editor.toPlainText(), self._base_dir(),
+                               self.owner.vault_path, self.owner.theme_name)
+        self.web.setHtml(html, QUrl.fromLocalFile(self._base_dir() + os.sep))
+
+    def set_mode(self, mode):
+        self.editor.setVisible(mode in ("Split", "Editor"))
+        self.web.setVisible(mode in ("Split", "Preview"))
+        if mode in ("Split", "Preview"):
+            self.refresh_preview()
+
+    def insert_media(self, kind):
+        base = self.owner.vault_path or (os.path.dirname(os.path.abspath(self.path))
+                                         if self.path else "")
+        if not base:
+            QMessageBox.information(
+                self, "No home for media",
+                "Set an Obsidian vault (⚙ Vault) or save this note first, so "
+                "embedded media has a folder to live in.")
+            return
+        if kind == "image":
+            flt = "Images (*.png *.jpg *.jpeg *.gif *.bmp *.webp *.svg)"
+        else:
+            flt = "Videos (*.mp4 *.webm *.mov *.mkv *.m4v *.ogv)"
+        src, _ = QFileDialog.getOpenFileName(self, f"Insert {kind}", base, flt)
+        if not src:
+            return
+        att = os.path.join(base, "attachments")
+        try:
+            os.makedirs(att, exist_ok=True)
+            dest = os.path.join(att, os.path.basename(src))
+            if os.path.abspath(src) != os.path.abspath(dest):
+                shutil.copy2(src, dest)
+        except Exception as e:
+            QMessageBox.warning(self, "Copy failed", str(e))
+            return
+        self.editor.insertPlainText(f"\n![[attachments/{os.path.basename(src)}]]\n")
+
+    def save(self):
+        if not self.path:
+            return self.save_as()
+        try:
+            with open(self.path, "w", encoding="utf-8") as fh:
+                fh.write(self.editor.toPlainText())
+            self._dirty = False
+            self._update_title()
+            self.owner.statusBar().showMessage(
+                f"Saved {os.path.basename(self.path)}", 3000)
+        except Exception as e:
+            QMessageBox.warning(self, "Save failed", str(e))
+
+    def save_as(self):
+        start = self.path or self.owner.vault_path or os.path.expanduser("~")
+        path, _ = QFileDialog.getSaveFileName(self, "Save Markdown Note", start,
+                                              "Markdown (*.md)")
+        if not path:
+            return
+        if not path.lower().endswith((".md", ".markdown")):
+            path += ".md"
+        self.path = path
+        self.save()
+        self.refresh_preview()
+
+    def closeEvent(self, e):
+        if self._dirty:
+            r = QMessageBox.question(
+                self, "Unsaved changes", "Save changes before closing?",
+                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel)
+            if r == QMessageBox.StandardButton.Save:
+                self.save()
+            elif r == QMessageBox.StandardButton.Cancel:
+                e.ignore()
+                return
+        e.accept()
+
+
 def global_exception_handler(exc_type, exc_value, exc_traceback):
     msg = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
     print("CRASH:", msg)
@@ -2738,6 +3031,8 @@ def global_exception_handler(exc_type, exc_value, exc_traceback):
 
 if __name__ == "__main__":
     sys.excepthook = global_exception_handler
+    # Required so the lazily-loaded QtWebEngine note preview shares a GL context
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     apply_theme(app, "AMOLED")
