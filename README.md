@@ -26,7 +26,8 @@ A beautiful, lightweight, and highly customizable PDF annotator built specifical
 - **Session Restoration:** Load an existing Markdown session to rebuild your annotation tree.
 - **Markdown Viewer:** Open and read any `.md` note from your Obsidian vault as formatted rich text — headings, quotes, notes, and embedded images render inline (no PDF required).
 - **Markdown Editor (Obsidian-style):** Create and edit `.md` notes with a live split-screen preview. Embed images **and video** exactly like Obsidian — drop a file in via 🖼/🎬 (it's copied into `attachments/` and linked as `![[...]]`), and it renders inline in the preview, with video playing right in the note. The preview matches your active theme.
-- **Vault Notes Sidebar:** Toggle 🗂 to show a collapsible sidebar listing every `.md` note in your vault (folders and all, `attachments/` hidden). Click a note to open it in the editor. Its visibility is remembered between sessions.
+- **Notes Sidebar (no vault required):** Toggle 🗂 to show a collapsible sidebar. Click 📂 inside it to browse **any folder** — your Obsidian vault, a downloads folder, a lectures folder — no vault setup needed. It lists `.md` notes **and media** (🎬 video, 🎵 audio, 🖼 images). Click a note to edit it; click a lecture video to play it right there. Remembered between sessions.
+- **Editor Formatting Shortcuts:** In the note editor, type text, select it, and press the app's own heading keys (`Alt+1`–`Alt+4` by default, customizable in the Shortcut Editor) to make it H1–H4 — press again to toggle off. Plus `Ctrl+B` bold, `Ctrl+I` italic, `Ctrl+Shift+Q` quote, `Ctrl+Shift+L` bullet list, and `Ctrl+E` to flip between edit and preview, just like Obsidian. Toolbar buttons (H1–H4, 𝐁, 𝘐, ❝, •) do the same by mouse.
 - **Table of Contents:** Quick navigation through the built-in PDF outline.
 
 ## Easy Setup for New Users
@@ -54,11 +55,12 @@ We provide a convenient script that automatically creates a Python virtual envir
 
 ### Working with Markdown Notes (Obsidian-style)
 
-1. Set your vault with **⚙ Set Vault Folder** (File menu), then toggle the **🗂 Vault Notes** sidebar to browse every `.md` note in it.
-2. **Click a note** in the sidebar to open it in the editor, or use **📝 New Markdown Note** / **✏ Edit Markdown Note** from the File menu.
-3. In the editor, write Markdown on the left and see a **live preview** on the right (toggle **Split / Editor / Preview**).
-4. Use the **🖼 Image** and **🎬 Video** buttons to embed media — the file is copied into `attachments/` and linked as `![[...]]`. Images render inline and **video plays right inside the note**, just like Obsidian.
-5. **📖 Open Markdown File** gives a quick, lightweight read-only view of any `.md` file.
+1. Toggle the **🗂 Notes sidebar** and click **📂** to browse any folder — an Obsidian vault is *optional*. (If you have set a vault, the sidebar shows it by default.)
+2. **Click a note** to open it in the editor, a **🎬 video / 🎵 audio / 🖼 image** to open it in the built-in player — handy for downloaded lectures. Or use **📝 New Markdown Note** / **✏ Edit Markdown Note** from the File menu.
+3. In the editor, write Markdown on the left and see a **live preview** on the right (**Split / Editor / Preview**, or `Ctrl+E` to flip edit↔preview).
+4. **Format like Obsidian:** select text and press `Alt+1`–`Alt+4` for headings (your customized app shortcuts apply here too), `Ctrl+B` bold, `Ctrl+I` italic, `Ctrl+Shift+Q` quote, `Ctrl+Shift+L` list — or use the toolbar buttons.
+5. Use the **🖼 Image** and **🎬 Video** buttons to embed media — the file is copied into `attachments/` and linked as `![[...]]`. Images render inline and **video plays right inside the note**.
+6. **📖 Open Markdown File** gives a quick, lightweight read-only view of any `.md` file.
 
 ## Customizing Commands / Shortcuts
 

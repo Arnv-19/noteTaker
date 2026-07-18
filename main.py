@@ -27,7 +27,7 @@ from PyQt6.QtWidgets import (
 )
 import re
 import shutil
-from PyQt6.QtCore import Qt, QRect, QPoint, QSize, QTimer, QUrl
+from PyQt6.QtCore import Qt, QRect, QPoint, QSize, QTimer, QUrl, QEvent
 from PyQt6.QtGui import (QPixmap, QImage, QAction, QKeySequence, QShortcut,
                          QColor, QPainter, QPen, QTextDocument, QPdfWriter, QIcon,
                          QFont)
@@ -92,6 +92,7 @@ class MainWindow(QMainWindow):
         self.accumulated_qrects = []
         self.source_title = "Untitled_PDF"
         self.vault_path = ""
+        self.notes_root = ""  # sidebar folder — any folder, vault optional
         self.night_mode = False
         self.save_to_pdf_mode = True
         self.theme_name = "AMOLED"
@@ -377,8 +378,15 @@ class MainWindow(QMainWindow):
         vault_layout.setSpacing(4)
         vhead = QHBoxLayout()
         vhead.setContentsMargins(4, 2, 2, 2)
-        vhead.addWidget(QLabel("📁 Vault Notes"))
+        self.vault_panel_label = QLabel("🗂 Notes")
+        vhead.addWidget(self.vault_panel_label)
         vhead.addStretch()
+        vfolder_btn = QPushButton("📂")
+        vfolder_btn.setFlat(True)
+        vfolder_btn.setFixedWidth(26)
+        vfolder_btn.setToolTip("Browse any folder (vault not required)")
+        vfolder_btn.clicked.connect(self.choose_notes_folder)
+        vhead.addWidget(vfolder_btn)
         vnew_btn = QPushButton("＋")
         vnew_btn.setFlat(True)
         vnew_btn.setFixedWidth(26)
@@ -548,6 +556,7 @@ class MainWindow(QMainWindow):
                 with open(self.SETTINGS_FILE, "r") as f:
                     data = json.load(f)
                 self.vault_path = data.get("vault_path", "")
+                self.notes_root = data.get("notes_root", "")
                 self.recent_files = data.get("recent_files", [])
                 self.bookmarks = data.get("bookmarks", {})
                 self.theme_name = data.get("theme", "AMOLED")
@@ -578,9 +587,10 @@ class MainWindow(QMainWindow):
                 self.save_pdf_switch.setChecked(self.save_to_pdf_mode)
                 self.theme_combo.setCurrentText(self.theme_name)
                 apply_theme(QApplication.instance(), self.theme_name)
-                # Show the vault sidebar if it was open last time (or a vault is set)
-                show_sidebar = data.get("vault_sidebar", bool(self.vault_path))
-                self.vault_toggle_action.setChecked(bool(self.vault_path) and show_sidebar)
+                # Show the notes sidebar if it was open last time
+                has_root = bool(self.vault_path or self.notes_root)
+                show_sidebar = data.get("vault_sidebar", has_root)
+                self.vault_toggle_action.setChecked(has_root and show_sidebar)
             except:
                 pass
 
@@ -603,6 +613,7 @@ class MainWindow(QMainWindow):
             "sketch_default_collapsed": self.sketch_default_collapsed,
             "shortcuts": self.shortcuts,
             "vault_sidebar": self.vault_panel.isVisible() if hasattr(self, "vault_panel") else False,
+            "notes_root": self.notes_root,
         }
         with open(self.SETTINGS_FILE, "w") as f:
             json.dump(data, f, indent=2)
@@ -2792,28 +2803,58 @@ class MainWindow(QMainWindow):
         if path:
             self._open_md_editor(path)
 
-    # ── Vault Notes sidebar ──────────────────────────────────────────────────
+    # ── Notes sidebar (any folder — vault optional) ──────────────────────────
     def toggle_vault_panel(self, checked):
         self.vault_panel.setVisible(checked)
         if checked:
             self.refresh_vault_tree()
 
+    def choose_notes_folder(self):
+        start = self.notes_root or self.vault_path or os.path.expanduser("~")
+        path = QFileDialog.getExistingDirectory(self, "Browse Folder (notes / lectures / vault)", start)
+        if path:
+            self.notes_root = path
+            self.save_settings()
+            self.vault_toggle_action.setChecked(True)
+            self.refresh_vault_tree()
+
     @staticmethod
-    def _dir_has_md(path):
+    def _is_note(name):
+        return name.lower().endswith((".md", ".markdown"))
+
+    @staticmethod
+    def _media_icon(name):
+        ext = os.path.splitext(name)[1].lower()
+        if ext in VIDEO_EXTS:
+            return "🎬"
+        if ext in AUDIO_EXTS:
+            return "🎵"
+        if ext in IMAGE_EXTS:
+            return "🖼"
+        return None
+
+    @classmethod
+    def _dir_has_content(cls, path):
         for _root, _dirs, files in os.walk(path):
-            if any(f.lower().endswith((".md", ".markdown")) for f in files):
-                return True
+            for f in files:
+                if cls._is_note(f) or cls._media_icon(f):
+                    return True
         return False
 
     def refresh_vault_tree(self):
         if not hasattr(self, "vault_tree"):
             return
         self.vault_tree.clear()
-        vp = self.vault_path
-        if not vp or not os.path.isdir(vp):
-            self.vault_tree.addTopLevelItem(
-                QTreeWidgetItem(["(no vault set — ☰ File ▸ ⚙ Set Vault Folder)"]))
+        root = self.notes_root or self.vault_path
+        self.vault_panel_label.setText(
+            f"🗂 {os.path.basename(root)}" if root else "🗂 Notes")
+        if not root or not os.path.isdir(root):
+            self.vault_tree.addTopLevelItem(QTreeWidgetItem(
+                ["(click 📂 to browse any folder,"]))
+            self.vault_tree.addTopLevelItem(QTreeWidgetItem(
+                [" or set a vault in ☰ File)"]))
             return
+        show_attachments = bool(self.notes_root)  # inside a vault keep them hidden
 
         def add_dir(parent, dirpath):
             try:
@@ -2823,26 +2864,56 @@ class MainWindow(QMainWindow):
             for e in entries:
                 full = os.path.join(dirpath, e)
                 if os.path.isdir(full):
-                    if e.startswith(".") or e == "attachments" or not self._dir_has_md(full):
+                    if e.startswith(".") or not self._dir_has_content(full):
+                        continue
+                    if e == "attachments" and not show_attachments:
                         continue
                     node = QTreeWidgetItem([f"📁 {e}"])
                     (parent.addChild if parent else self.vault_tree.addTopLevelItem)(node)
                     add_dir(node, full)
             for e in entries:
-                if e.lower().endswith((".md", ".markdown")):
+                full = os.path.join(dirpath, e)
+                if not os.path.isfile(full):
+                    continue
+                if self._is_note(e):
                     node = QTreeWidgetItem([f"📄 {os.path.splitext(e)[0]}"])
-                    node.setData(0, Qt.ItemDataRole.UserRole, os.path.join(dirpath, e))
-                    (parent.addChild if parent else self.vault_tree.addTopLevelItem)(node)
+                elif self._media_icon(e):
+                    node = QTreeWidgetItem([f"{self._media_icon(e)} {e}"])
+                else:
+                    continue
+                node.setData(0, Qt.ItemDataRole.UserRole, full)
+                (parent.addChild if parent else self.vault_tree.addTopLevelItem)(node)
 
-        add_dir(None, vp)
+        add_dir(None, root)
         self.vault_tree.expandToDepth(0)
         if self.vault_tree.topLevelItemCount() == 0:
-            self.vault_tree.addTopLevelItem(QTreeWidgetItem(["(no .md notes yet)"]))
+            self.vault_tree.addTopLevelItem(
+                QTreeWidgetItem(["(no notes or media here yet)"]))
 
     def on_vault_item_clicked(self, item, _col=0):
         path = item.data(0, Qt.ItemDataRole.UserRole)
-        if path and os.path.isfile(path):
+        if not path or not os.path.isfile(path):
+            return
+        if self._is_note(path):
             self._open_md_editor(path)
+        else:
+            self._open_media_player(path)
+
+    def _open_media_player(self, path):
+        """Play a video/audio file (or show an image) in a themed window —
+        e.g. downloaded lectures, straight from the sidebar."""
+        try:
+            dlg = MediaPlayerDialog(self, path)
+        except Exception as e:
+            QMessageBox.critical(self, "Player unavailable",
+                                 f"Could not open the media player:\n{e}")
+            return
+        if not hasattr(self, "_media_players"):
+            self._media_players = []
+        self._media_players = [d for d in self._media_players if d.isVisible()]
+        self._media_players.append(dlg)
+        dlg.show()
+        dlg.raise_()
 
     def closeEvent(self, event):
         self.pdf.flush()
@@ -2962,6 +3033,49 @@ def note_md_to_html(raw, base_dir, vault_path, theme_name):
 </style></head><body>{inner}</body></html>"""
 
 
+class MediaPlayerDialog(QDialog):
+    """Plays a video/audio file (or shows an image) in a themed Chromium view.
+    Lets lecture recordings etc. open straight from the Notes sidebar."""
+
+    def __init__(self, owner, path):
+        super().__init__(owner)
+        self.setWindowTitle(os.path.basename(path))
+        self.resize(960, 620)
+        from PyQt6.QtWebEngineWidgets import QWebEngineView
+        from PyQt6.QtWebEngineCore import QWebEngineSettings
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.web = QWebEngineView()
+        ws = self.web.settings()
+        ws.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
+        ws.setAttribute(QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, False)
+        layout.addWidget(self.web)
+
+        url = QUrl.fromLocalFile(os.path.abspath(path)).toString()
+        ext = os.path.splitext(path)[1].lower()
+        if ext in VIDEO_EXTS:
+            tag = f'<video controls autoplay src="{url}"></video>'
+        elif ext in AUDIO_EXTS:
+            tag = f'<audio controls autoplay src="{url}"></audio>'
+        else:
+            tag = f'<img src="{url}">'
+        t = THEMES.get(owner.theme_name, THEMES["AMOLED"])
+        bg = "rgb(%d,%d,%d)" % t["window"]
+        self.web.setHtml(
+            f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+            html,body {{ margin:0; height:100%; background:{bg};
+              display:flex; align-items:center; justify-content:center; }}
+            video,img {{ max-width:100%; max-height:100vh; }}
+            audio {{ width:90%; }}
+            </style></head><body>{tag}</body></html>""",
+            QUrl.fromLocalFile(os.path.dirname(os.path.abspath(path)) + os.sep))
+
+    def closeEvent(self, e):
+        self.web.setHtml("")  # stop playback
+        e.accept()
+
+
 class MarkdownEditorDialog(QDialog):
     """A create/edit Markdown note window with a live Obsidian-style preview
     (images + playable video) powered by QtWebEngine."""
@@ -2984,12 +3098,28 @@ class MarkdownEditorDialog(QDialog):
         bar.addAction("💾 Save", self.save)
         bar.addAction("Save As…", self.save_as)
         bar.addSeparator()
+        # Formatting: headings reuse the app's own configurable h1-h4 keys
+        ks = owner.shortcuts
+        for lvl in range(1, 5):
+            a = bar.addAction(f"H{lvl}", lambda _=False, n=lvl: self.toggle_heading(n))
+            a.setToolTip(f"Heading {lvl} on current/selected lines "
+                         f"({ks.get(f'h{lvl}', '')})")
+        b = bar.addAction("𝐁", lambda: self.wrap_selection("**"))
+        b.setToolTip("Bold (Ctrl+B)")
+        i = bar.addAction("𝘐", lambda: self.wrap_selection("*"))
+        i.setToolTip("Italic (Ctrl+I)")
+        q = bar.addAction("❝", lambda: self.toggle_line_prefix("> "))
+        q.setToolTip("Quote (Ctrl+Shift+Q)")
+        li = bar.addAction("•", lambda: self.toggle_line_prefix("- "))
+        li.setToolTip("Bullet list (Ctrl+Shift+L)")
+        bar.addSeparator()
         bar.addAction("🖼 Image", lambda: self.insert_media("image"))
         bar.addAction("🎬 Video", lambda: self.insert_media("video"))
         bar.addSeparator()
         bar.addWidget(QLabel(" View "))
         self.mode_combo = QComboBox()
         self.mode_combo.addItems(["Split", "Editor", "Preview"])
+        self.mode_combo.setToolTip("Ctrl+E toggles Editor/Preview, like Obsidian")
         self.mode_combo.currentTextChanged.connect(self.set_mode)
         bar.addWidget(self.mode_combo)
         root.addWidget(bar)
@@ -3002,6 +3132,9 @@ class MarkdownEditorDialog(QDialog):
         mono.setStyleHint(QFont.StyleHint.Monospace)
         mono.setPointSize(11)
         self.editor.setFont(mono)
+        # Route formatting keys (Alt+1…4, Ctrl+B/I, …) to the editor itself,
+        # before the main window's application-wide shortcuts can steal them.
+        self.editor.installEventFilter(self)
 
         self.web = QWebEngineView()
         ws = self.web.settings()
@@ -3037,7 +3170,8 @@ class MarkdownEditorDialog(QDialog):
     def _base_dir(self):
         if self.path:
             return os.path.dirname(os.path.abspath(self.path))
-        return self.owner.vault_path or os.path.expanduser("~")
+        return (self.owner.vault_path or self.owner.notes_root
+                or os.path.expanduser("~"))
 
     def _on_changed(self):
         self._dirty = True
@@ -3055,13 +3189,115 @@ class MarkdownEditorDialog(QDialog):
         if mode in ("Split", "Preview"):
             self.refresh_preview()
 
+    # ── Obsidian-style formatting ────────────────────────────────────────────
+    def _format_actions(self):
+        """Key sequence -> action. Headings reuse the app's configured keys."""
+        acts = {}
+        for lvl in range(1, 5):
+            keys = self.owner.shortcuts.get(f"h{lvl}")
+            if keys:
+                acts[keys] = lambda n=lvl: self.toggle_heading(n)
+        acts["Ctrl+B"] = lambda: self.wrap_selection("**")
+        acts["Ctrl+I"] = lambda: self.wrap_selection("*")
+        acts["Ctrl+Shift+Q"] = lambda: self.toggle_line_prefix("> ")
+        acts["Ctrl+Shift+L"] = lambda: self.toggle_line_prefix("- ")
+        acts["Ctrl+E"] = self.toggle_edit_preview
+        return acts
+
+    def eventFilter(self, obj, event):
+        if obj is self.editor and event.type() in (
+                QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress):
+            if event.key() in (Qt.Key.Key_Control, Qt.Key.Key_Shift,
+                               Qt.Key.Key_Alt, Qt.Key.Key_Meta):
+                return super().eventFilter(obj, event)
+            pressed = QKeySequence(event.keyCombination())
+            for keys, action in self._format_actions().items():
+                if QKeySequence(keys).matches(pressed) == \
+                        QKeySequence.SequenceMatch.ExactMatch:
+                    if event.type() == QEvent.Type.ShortcutOverride:
+                        event.accept()  # claim the key from global shortcuts
+                    else:
+                        action()
+                    return True
+        return super().eventFilter(obj, event)
+
+    def toggle_edit_preview(self):
+        self.mode_combo.setCurrentText(
+            "Preview" if self.mode_combo.currentText() != "Preview" else "Editor")
+
+    def toggle_heading(self, level):
+        """Set (or toggle off) `level` heading on every selected line."""
+        cur = self.editor.textCursor()
+        doc = self.editor.document()
+        start_block = doc.findBlock(cur.selectionStart())
+        end_block = doc.findBlock(cur.selectionEnd())
+        blocks = []
+        b = start_block
+        while True:
+            blocks.append(b)
+            if b == end_block:
+                break
+            b = b.next()
+        prefix = "#" * level + " "
+        all_at_level = all(
+            re.match(r"^#{%d} " % level, bl.text()) for bl in blocks)
+        cur.beginEditBlock()
+        for bl in blocks:
+            c = self.editor.textCursor()
+            c.setPosition(bl.position())
+            c.movePosition(c.MoveOperation.EndOfBlock, c.MoveMode.KeepAnchor)
+            stripped = re.sub(r"^#{1,6} ", "", bl.text())
+            c.insertText(stripped if all_at_level else prefix + stripped)
+        cur.endEditBlock()
+
+    def toggle_line_prefix(self, prefix):
+        cur = self.editor.textCursor()
+        doc = self.editor.document()
+        start_block = doc.findBlock(cur.selectionStart())
+        end_block = doc.findBlock(cur.selectionEnd())
+        blocks = []
+        b = start_block
+        while True:
+            blocks.append(b)
+            if b == end_block:
+                break
+            b = b.next()
+        all_prefixed = all(bl.text().startswith(prefix) for bl in blocks)
+        cur.beginEditBlock()
+        for bl in blocks:
+            c = self.editor.textCursor()
+            c.setPosition(bl.position())
+            c.movePosition(c.MoveOperation.EndOfBlock, c.MoveMode.KeepAnchor)
+            t = bl.text()
+            c.insertText(t[len(prefix):] if all_prefixed and t.startswith(prefix)
+                         else prefix + t)
+        cur.endEditBlock()
+
+    def wrap_selection(self, marker):
+        """Wrap the selection in `marker` (bold/italic), or unwrap if already
+        wrapped. With no selection, insert the markers and park the cursor
+        between them."""
+        cur = self.editor.textCursor()
+        if not cur.hasSelection():
+            cur.insertText(marker + marker)
+            cur.movePosition(cur.MoveOperation.Left,
+                             cur.MoveMode.MoveAnchor, len(marker))
+            self.editor.setTextCursor(cur)
+            return
+        text = cur.selectedText()
+        if text.startswith(marker) and text.endswith(marker) \
+                and len(text) >= 2 * len(marker):
+            cur.insertText(text[len(marker):-len(marker)])
+        else:
+            cur.insertText(f"{marker}{text}{marker}")
+
     def insert_media(self, kind):
-        base = self.owner.vault_path or (os.path.dirname(os.path.abspath(self.path))
-                                         if self.path else "")
+        base = (os.path.dirname(os.path.abspath(self.path)) if self.path
+                else self.owner.vault_path or self.owner.notes_root)
         if not base:
             QMessageBox.information(
                 self, "No home for media",
-                "Set an Obsidian vault (⚙ Vault) or save this note first, so "
+                "Save this note first (or set a vault / browse a folder), so "
                 "embedded media has a folder to live in.")
             return
         if kind == "image":
