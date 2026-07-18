@@ -2,13 +2,6 @@
 from PyQt6.QtGui import QColor
 
 THEMES = {
-    "Dark Black": {
-        "window": (26, 27, 38), "window_text": (192, 202, 245),
-        "base": (36, 40, 59), "alt_base": (26, 27, 38),
-        "text": (192, 202, 245), "button": (36, 40, 59),
-        "button_text": (192, 202, 245), "bright": (247, 118, 142),
-        "highlight": (122, 162, 247), "highlight_text": (26, 27, 38),
-    },
     "AMOLED": {
         "window": (0, 0, 0), "window_text": (222, 222, 222),
         "base": (10, 10, 10), "alt_base": (0, 0, 0),
@@ -16,19 +9,19 @@ THEMES = {
         "button_text": (222, 222, 222), "bright": (255, 122, 122),
         "highlight": (80, 140, 255), "highlight_text": (0, 0, 0),
     },
-    "Blue": {
-        "window": (17, 24, 39), "window_text": (187, 210, 245),
-        "base": (24, 34, 56), "alt_base": (17, 24, 39),
-        "text": (187, 210, 245), "button": (24, 34, 56),
-        "button_text": (187, 210, 245), "bright": (96, 165, 250),
-        "highlight": (59, 130, 246), "highlight_text": (255, 255, 255),
+    "Storm Harbour": {
+        "window": (2, 12, 26), "window_text": (192, 210, 225),
+        "base": (22, 22, 22), "alt_base": (11, 11, 11),
+        "text": (192, 210, 225), "button": (22, 22, 22),
+        "button_text": (192, 210, 225), "bright": (127, 9, 9),
+        "highlight": (13, 107, 61), "highlight_text": (240, 240, 240),
     },
     "Purple": {
-        "window": (30, 20, 44), "window_text": (220, 200, 245),
-        "base": (42, 28, 62), "alt_base": (30, 20, 44),
-        "text": (220, 200, 245), "button": (42, 28, 62),
-        "button_text": (220, 200, 245), "bright": (192, 132, 252),
-        "highlight": (147, 51, 234), "highlight_text": (255, 255, 255),
+        "window": (15, 10, 26), "window_text": (210, 200, 230),
+        "base": (26, 18, 48), "alt_base": (15, 10, 26),
+        "text": (210, 200, 230), "button": (26, 18, 48),
+        "button_text": (210, 200, 230), "bright": (232, 160, 140),
+        "highlight": (139, 92, 246), "highlight_text": (240, 235, 250),
     },
     "Sepia": {
         "window": (62, 49, 37), "window_text": (230, 213, 189),
@@ -37,10 +30,38 @@ THEMES = {
         "button_text": (230, 213, 189), "bright": (217, 119, 6),
         "highlight": (180, 120, 60), "highlight_text": (255, 255, 255),
     },
+    "Obsidian Grey": {
+        "window": (22, 22, 22), "window_text": (200, 200, 200),
+        "base": (30, 30, 30), "alt_base": (22, 22, 22),
+        "text": (200, 200, 200), "button": (30, 30, 30),
+        "button_text": (200, 200, 200), "bright": (255, 140, 60),
+        "highlight": (90, 90, 90), "highlight_text": (240, 240, 240),
+    },
+    "Void Eclipse": {
+        "window": (11, 11, 11), "window_text": (190, 190, 200),
+        "base": (18, 18, 20), "alt_base": (11, 11, 11),
+        "text": (190, 190, 200), "button": (18, 18, 20),
+        "button_text": (190, 190, 200), "bright": (120, 80, 220),
+        "highlight": (60, 40, 140), "highlight_text": (220, 220, 230),
+    },
+    "Slytherin": {
+        "window": (8, 18, 12), "window_text": (180, 220, 195),
+        "base": (14, 28, 20), "alt_base": (8, 18, 12),
+        "text": (180, 220, 195), "button": (14, 28, 20),
+        "button_text": (180, 220, 195), "bright": (190, 200, 180),
+        "highlight": (13, 107, 61), "highlight_text": (230, 245, 235),
+    },
+    "Gryffindor": {
+        "window": (24, 8, 8), "window_text": (225, 190, 185),
+        "base": (36, 14, 14), "alt_base": (24, 8, 8),
+        "text": (225, 190, 185), "button": (36, 14, 14),
+        "button_text": (225, 190, 185), "bright": (218, 165, 32),
+        "highlight": (127, 9, 9), "highlight_text": (240, 220, 210),
+    },
 }
 
 def apply_theme(app, theme_name):
-    t = THEMES.get(theme_name, THEMES["Dark Black"])
+    t = THEMES.get(theme_name, THEMES["AMOLED"])
     palette = app.palette()
     palette.setColor(palette.ColorRole.Window, QColor(*t["window"]))
     palette.setColor(palette.ColorRole.WindowText, QColor(*t["window_text"]))
