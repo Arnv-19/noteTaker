@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
     QLabel, QScrollArea, QSplitter, QToolBar, QInputDialog,
     QMessageBox, QLineEdit, QMenu, QDialog, QGridLayout, QComboBox,
     QTabWidget, QCheckBox, QKeySequenceEdit, QWidgetAction, QSizePolicy,
-    QAbstractItemView, QTabBar, QTextBrowser, QPlainTextEdit
+    QAbstractItemView, QTabBar, QTextBrowser, QPlainTextEdit, QStackedWidget
 )
 import re
 import shutil
@@ -364,6 +364,7 @@ class MainWindow(QMainWindow):
         self.doc_tabs.setExpanding(False)
         self.doc_tabs.currentChanged.connect(self.on_tab_changed)
         self.doc_tabs.tabCloseRequested.connect(self.on_tab_close)
+        self.doc_tabs.tabBarClicked.connect(lambda _i: self.show_pdf_center())
         self.doc_tabs.hide()  # shown once a PDF is open
         central_layout.addWidget(self.doc_tabs)
 
@@ -403,6 +404,8 @@ class MainWindow(QMainWindow):
         self.vault_tree = QTreeWidget()
         self.vault_tree.setHeaderHidden(True)
         self.vault_tree.itemClicked.connect(self.on_vault_item_clicked)
+        self.vault_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.vault_tree.customContextMenuRequested.connect(self.show_vault_tree_menu)
         vault_layout.addWidget(self.vault_tree)
         splitter.addWidget(self.vault_panel)
         self.vault_panel.hide()  # shown via toggle / when a vault is set
@@ -446,8 +449,19 @@ class MainWindow(QMainWindow):
         self.scroll_area.setWidget(self.viewer)
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.verticalScrollBar().valueChanged.connect(self.on_viewer_scrolled)
-        left_layout.addWidget(self.scroll_area)
-        
+
+        # Center stack: page 0 = the PDF view, page 1 = note tabs.
+        # Notes open here in the middle (like PDFs do), not in extra windows.
+        self.center_stack = QStackedWidget()
+        self.center_stack.addWidget(self.scroll_area)
+        self.notes_tabs = QTabWidget()
+        self.notes_tabs.setTabsClosable(True)
+        self.notes_tabs.setDocumentMode(True)
+        self.notes_tabs.setMovable(True)
+        self.notes_tabs.tabCloseRequested.connect(self.on_note_tab_close)
+        self.center_stack.addWidget(self.notes_tabs)
+        left_layout.addWidget(self.center_stack)
+
         splitter.addWidget(left_panel)
 
         # Right side: Tabbed Panel for Annotations and Outline
@@ -1098,6 +1112,7 @@ class MainWindow(QMainWindow):
             idx = self._tab_index_for(abs_path)
             if idx >= 0:
                 self.doc_tabs.setCurrentIndex(idx)
+            self.show_pdf_center()
             return
 
         # Save bookmark + session for the current PDF before switching
@@ -1131,6 +1146,7 @@ class MainWindow(QMainWindow):
             self.current_page_idx = 0
 
         self.show_page()
+        self.show_pdf_center()
 
         if saved_page > 0:
             self.statusBar().showMessage(f"Resumed at page {saved_page + 1} (bookmarked)", 3000)
@@ -2768,32 +2784,54 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Viewing {os.path.basename(path)}", 3000)
         dlg.exec()
 
-    def _open_md_editor(self, path=None):
-        """Open the Obsidian-style Markdown editor (non-modal). Keeps a
-        reference so multiple note windows can stay open alongside the PDF.
-        If the file is already open, raise that window instead of duplicating."""
-        if not hasattr(self, "_md_editors"):
-            self._md_editors = []
-        self._md_editors = [d for d in self._md_editors if d.isVisible()]
+    def show_pdf_center(self):
+        self.center_stack.setCurrentWidget(self.scroll_area)
+
+    def show_notes_center(self):
+        self.center_stack.setCurrentWidget(self.notes_tabs)
+
+    def _open_md_editor(self, path=None, mode="Split"):
+        """Open a note as a tab in the middle area (like PDFs). If the file
+        is already open in a tab, switch to that tab instead of duplicating."""
         if path:
             ap = os.path.abspath(path)
-            for d in self._md_editors:
-                if d.path and os.path.abspath(d.path) == ap:
-                    d.raise_()
-                    d.activateWindow()
+            for i in range(self.notes_tabs.count()):
+                w = self.notes_tabs.widget(i)
+                if w.path and os.path.abspath(w.path) == ap:
+                    self.notes_tabs.setCurrentIndex(i)
+                    self.show_notes_center()
+                    self.vault_toggle_action.setChecked(False)
                     return
         try:
-            dlg = MarkdownEditorDialog(self, path)
+            page = MarkdownEditorWidget(self, path, start_mode=mode)
         except Exception as e:
             QMessageBox.critical(self, "Editor unavailable",
                                  f"Could not open the Markdown editor:\n{e}")
             return
-        self._md_editors.append(dlg)
-        dlg.show()
-        dlg.raise_()
+        name = os.path.splitext(os.path.basename(path))[0] if path else "Untitled"
+        idx = self.notes_tabs.addTab(page, f"📝 {name}")
+        self.notes_tabs.setCurrentIndex(idx)
+        self.show_notes_center()
+        # Collapse the sidebar so the note gets the full width; 🗂 re-opens it
+        self.vault_toggle_action.setChecked(False)
+
+    def _update_note_tab(self, widget, text):
+        idx = self.notes_tabs.indexOf(widget)
+        if idx >= 0:
+            self.notes_tabs.setTabText(idx, f"📝 {text}")
+
+    def on_note_tab_close(self, idx):
+        w = self.notes_tabs.widget(idx)
+        if w is not None and not w.maybe_close():
+            return  # user cancelled the unsaved-changes prompt
+        self.notes_tabs.removeTab(idx)
+        if w is not None:
+            w.deleteLater()
+        if self.notes_tabs.count() == 0:
+            self.show_pdf_center()
 
     def new_markdown_note(self):
-        self._open_md_editor(None)
+        self._open_md_editor(None, mode="Split")
 
     def edit_markdown_note(self):
         start = self.vault_path or os.path.expanduser("~")
@@ -2895,9 +2933,48 @@ class MainWindow(QMainWindow):
         if not path or not os.path.isfile(path):
             return
         if self._is_note(path):
-            self._open_md_editor(path)
+            # Obsidian-style: single click opens read view; double-click the
+            # preview (or Ctrl+E) to switch into editing.
+            self._open_md_editor(path, mode="Preview")
         else:
             self._open_media_player(path)
+
+    def show_vault_tree_menu(self, pos):
+        item = self.vault_tree.itemAt(pos)
+        if item is None:
+            return
+        path = item.data(0, Qt.ItemDataRole.UserRole)
+        if not path:
+            return  # folder rows: no actions yet
+        menu = QMenu(self)
+        menu.addAction("🗑 Delete", lambda: self.delete_vault_file(path))
+        menu.exec(self.vault_tree.viewport().mapToGlobal(pos))
+
+    def delete_vault_file(self, path):
+        name = os.path.basename(path)
+        r = QMessageBox.question(
+            self, "Delete file",
+            f"Permanently delete “{name}”?\n\nThis cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if r != QMessageBox.StandardButton.Yes:
+            return
+        ap = os.path.abspath(path)
+        # Close its tab first (without an unsaved-changes prompt — it's going away)
+        for i in range(self.notes_tabs.count()):
+            w = self.notes_tabs.widget(i)
+            if w.path and os.path.abspath(w.path) == ap:
+                w._dirty = False
+                self.notes_tabs.removeTab(i)
+                w.deleteLater()
+                break
+        try:
+            os.remove(path)
+            self.statusBar().showMessage(f"Deleted {name}", 3000)
+        except Exception as e:
+            QMessageBox.warning(self, "Delete failed", str(e))
+        if self.notes_tabs.count() == 0:
+            self.show_pdf_center()
+        self.refresh_vault_tree()
 
     def _open_media_player(self, path):
         """Play a video/audio file (or show an image) in a themed window —
@@ -2916,6 +2993,11 @@ class MainWindow(QMainWindow):
         dlg.raise_()
 
     def closeEvent(self, event):
+        # Give open notes a chance to save (or the user a chance to cancel)
+        for i in range(self.notes_tabs.count()):
+            if not self.notes_tabs.widget(i).maybe_close():
+                event.ignore()
+                return
         self.pdf.flush()
         self.save_bookmark()
         self.save_settings()
@@ -2946,6 +3028,13 @@ def _strip_frontmatter(text):
     return text
 
 
+def _file_url(path):
+    """Absolute, percent-encoded file:// URL. Encoding matters: markdown and
+    HTML both choke on raw spaces in paths like 'Textbooks notes/IMG 1.JPG'."""
+    return QUrl.fromLocalFile(os.path.abspath(path)).toString(
+        QUrl.ComponentFormattingOption.FullyEncoded)
+
+
 def _resolve_media_url(name, base_dir, vault_path):
     """Resolve a vault-relative media reference to an absolute file:// URL."""
     name = name.split("|")[0].strip()
@@ -2957,9 +3046,9 @@ def _resolve_media_url(name, base_dir, vault_path):
     for root in roots:
         cand = os.path.join(root, name)
         if os.path.isfile(cand):
-            return QUrl.fromLocalFile(os.path.abspath(cand)).toString()
+            return _file_url(cand)
     # Not found — still hand back a file URL relative to the note's folder
-    return QUrl.fromLocalFile(os.path.abspath(os.path.join(base_dir, name))).toString()
+    return _file_url(os.path.join(base_dir, name))
 
 
 def note_md_to_html(raw, base_dir, vault_path, theme_name):
@@ -3052,7 +3141,7 @@ class MediaPlayerDialog(QDialog):
         ws.setAttribute(QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, False)
         layout.addWidget(self.web)
 
-        url = QUrl.fromLocalFile(os.path.abspath(path)).toString()
+        url = _file_url(path)
         ext = os.path.splitext(path)[1].lower()
         if ext in VIDEO_EXTS:
             tag = f'<video controls autoplay src="{url}"></video>'
@@ -3076,16 +3165,18 @@ class MediaPlayerDialog(QDialog):
         e.accept()
 
 
-class MarkdownEditorDialog(QDialog):
-    """A create/edit Markdown note window with a live Obsidian-style preview
-    (images + playable video) powered by QtWebEngine."""
+class MarkdownEditorWidget(QWidget):
+    """A create/edit Markdown note page with a live Obsidian-style preview
+    (images + playable video) powered by QtWebEngine. Lives as a tab in the
+    main window's center area. start_mode="Preview" gives Obsidian's reading
+    view; double-clicking the preview (or Ctrl+E) switches to editing."""
 
-    def __init__(self, owner, path=None):
-        super().__init__(owner)
+    def __init__(self, owner, path=None, start_mode="Split"):
+        super().__init__()
         self.owner = owner
         self.path = path
         self._dirty = False
-        self.resize(1160, 840)
+        self._web_proxy = None
 
         # Lazy import keeps Chromium out of app startup and the PDF workflow
         from PyQt6.QtWebEngineWidgets import QWebEngineView
@@ -3141,6 +3232,14 @@ class MarkdownEditorDialog(QDialog):
         ws.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
         ws.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
         ws.setAttribute(QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, False)
+        # Double-clicking the preview switches to editing (Obsidian behavior).
+        # Chromium routes input to an internal focus-proxy child, so hook that.
+        self.web.loadFinished.connect(self._arm_preview_dblclick)
+
+        # Ctrl+E works from the preview too, not just inside the text editor
+        e_sc = QShortcut(QKeySequence("Ctrl+E"), self)
+        e_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        e_sc.activated.connect(self.toggle_edit_preview)
 
         self.split.addWidget(self.editor)
         self.split.addWidget(self.web)
@@ -3160,12 +3259,21 @@ class MarkdownEditorDialog(QDialog):
             except Exception as e:
                 QMessageBox.warning(self, "Open failed", str(e))
             self._dirty = False
+        if start_mode != "Split":
+            self.mode_combo.setCurrentText(start_mode)  # triggers set_mode
         self._update_title()
         self.refresh_preview()
 
+    def _arm_preview_dblclick(self, _ok=True):
+        fp = self.web.focusProxy()
+        if fp is not None and fp is not self._web_proxy:
+            fp.installEventFilter(self)
+            self._web_proxy = fp
+
     def _update_title(self):
-        name = os.path.basename(self.path) if self.path else "Untitled"
-        self.setWindowTitle(f"📝 {name}{'  •' if self._dirty else ''}")
+        name = (os.path.splitext(os.path.basename(self.path))[0]
+                if self.path else "Untitled")
+        self.owner._update_note_tab(self, f"{name}{' •' if self._dirty else ''}")
 
     def _base_dir(self):
         if self.path:
@@ -3205,6 +3313,12 @@ class MarkdownEditorDialog(QDialog):
         return acts
 
     def eventFilter(self, obj, event):
+        if obj is self._web_proxy and \
+                event.type() == QEvent.Type.MouseButtonDblClick:
+            if self.mode_combo.currentText() == "Preview":
+                self.mode_combo.setCurrentText("Split")
+                return True
+            return False
         if obj is self.editor and event.type() in (
                 QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress):
             if event.key() in (Qt.Key.Key_Control, Qt.Key.Key_Shift,
@@ -3307,6 +3421,12 @@ class MarkdownEditorDialog(QDialog):
         src, _ = QFileDialog.getOpenFileName(self, f"Insert {kind}", base, flt)
         if not src:
             return
+        # Already inside the note's folder tree? Reference it in place —
+        # no copy into attachments/ needed.
+        rel = os.path.relpath(os.path.abspath(src), os.path.abspath(base))
+        if not rel.startswith(".."):
+            self.editor.insertPlainText(f"\n![[{rel.replace(os.sep, '/')}]]\n")
+            return
         att = os.path.join(base, "attachments")
         try:
             os.makedirs(att, exist_ok=True)
@@ -3343,7 +3463,8 @@ class MarkdownEditorDialog(QDialog):
         self.save()
         self.refresh_preview()
 
-    def closeEvent(self, e):
+    def maybe_close(self):
+        """Ask about unsaved changes. Returns False if the user cancels."""
         if self._dirty:
             r = QMessageBox.question(
                 self, "Unsaved changes", "Save changes before closing?",
@@ -3351,10 +3472,11 @@ class MarkdownEditorDialog(QDialog):
                 | QMessageBox.StandardButton.Cancel)
             if r == QMessageBox.StandardButton.Save:
                 self.save()
-            elif r == QMessageBox.StandardButton.Cancel:
-                e.ignore()
-                return
-        e.accept()
+                return not self._dirty  # save may have been cancelled (Save As)
+            if r == QMessageBox.StandardButton.Cancel:
+                return False
+        self.web.setHtml("")  # stop any playing video
+        return True
 
 
 def global_exception_handler(exc_type, exc_value, exc_traceback):
