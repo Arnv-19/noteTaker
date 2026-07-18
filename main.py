@@ -153,6 +153,13 @@ class MainWindow(QMainWindow):
         # Keep attribute so show_recent_files can anchor its popup
         self.recent_btn = file_btn
 
+        # Vault notes sidebar toggle
+        self.vault_toggle_action = QAction("🗂", self)
+        self.vault_toggle_action.setToolTip("Toggle vault notes sidebar")
+        self.vault_toggle_action.setCheckable(True)
+        self.vault_toggle_action.toggled.connect(self.toggle_vault_panel)
+        toolbar.addAction(self.vault_toggle_action)
+
         toolbar.addSeparator()
 
         # ── Page navigation ──
@@ -363,6 +370,35 @@ class MainWindow(QMainWindow):
         central_layout.addWidget(splitter)
         self.setCentralWidget(central)
 
+        # Vault Notes sidebar (leftmost) — lists every .md note in the vault
+        self.vault_panel = QWidget()
+        vault_layout = QVBoxLayout(self.vault_panel)
+        vault_layout.setContentsMargins(4, 4, 4, 4)
+        vault_layout.setSpacing(4)
+        vhead = QHBoxLayout()
+        vhead.setContentsMargins(4, 2, 2, 2)
+        vhead.addWidget(QLabel("📁 Vault Notes"))
+        vhead.addStretch()
+        vnew_btn = QPushButton("＋")
+        vnew_btn.setFlat(True)
+        vnew_btn.setFixedWidth(26)
+        vnew_btn.setToolTip("New note")
+        vnew_btn.clicked.connect(self.new_markdown_note)
+        vrefresh_btn = QPushButton("⟳")
+        vrefresh_btn.setFlat(True)
+        vrefresh_btn.setFixedWidth(26)
+        vrefresh_btn.setToolTip("Refresh vault")
+        vrefresh_btn.clicked.connect(self.refresh_vault_tree)
+        vhead.addWidget(vnew_btn)
+        vhead.addWidget(vrefresh_btn)
+        vault_layout.addLayout(vhead)
+        self.vault_tree = QTreeWidget()
+        self.vault_tree.setHeaderHidden(True)
+        self.vault_tree.itemClicked.connect(self.on_vault_item_clicked)
+        vault_layout.addWidget(self.vault_tree)
+        splitter.addWidget(self.vault_panel)
+        self.vault_panel.hide()  # shown via toggle / when a vault is set
+
         # Left side: Search Bar + PDF Viewer
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
@@ -474,7 +510,7 @@ class MainWindow(QMainWindow):
         right_panel.addTab(review_tab, "Review")
 
         splitter.addWidget(right_panel)
-        splitter.setSizes([800, 400])
+        splitter.setSizes([230, 800, 400])
 
     def setup_shortcuts(self):
         if hasattr(self, 'active_shortcuts'):
@@ -542,6 +578,9 @@ class MainWindow(QMainWindow):
                 self.save_pdf_switch.setChecked(self.save_to_pdf_mode)
                 self.theme_combo.setCurrentText(self.theme_name)
                 apply_theme(QApplication.instance(), self.theme_name)
+                # Show the vault sidebar if it was open last time (or a vault is set)
+                show_sidebar = data.get("vault_sidebar", bool(self.vault_path))
+                self.vault_toggle_action.setChecked(bool(self.vault_path) and show_sidebar)
             except:
                 pass
 
@@ -563,6 +602,7 @@ class MainWindow(QMainWindow):
             "pen_width": self.pen_width,
             "sketch_default_collapsed": self.sketch_default_collapsed,
             "shortcuts": self.shortcuts,
+            "vault_sidebar": self.vault_panel.isVisible() if hasattr(self, "vault_panel") else False,
         }
         with open(self.SETTINGS_FILE, "w") as f:
             json.dump(data, f, indent=2)
@@ -572,6 +612,8 @@ class MainWindow(QMainWindow):
         if path:
             self.vault_path = path
             self.save_settings()
+            self.refresh_vault_tree()
+            self.vault_toggle_action.setChecked(True)
             QMessageBox.information(self, "Vault Set", f"Obsidian vault set to:\n{self.vault_path}")
 
     # ── Theme ────────────────────────────────────────────────────────────────
@@ -2717,16 +2759,24 @@ class MainWindow(QMainWindow):
 
     def _open_md_editor(self, path=None):
         """Open the Obsidian-style Markdown editor (non-modal). Keeps a
-        reference so multiple note windows can stay open alongside the PDF."""
+        reference so multiple note windows can stay open alongside the PDF.
+        If the file is already open, raise that window instead of duplicating."""
+        if not hasattr(self, "_md_editors"):
+            self._md_editors = []
+        self._md_editors = [d for d in self._md_editors if d.isVisible()]
+        if path:
+            ap = os.path.abspath(path)
+            for d in self._md_editors:
+                if d.path and os.path.abspath(d.path) == ap:
+                    d.raise_()
+                    d.activateWindow()
+                    return
         try:
             dlg = MarkdownEditorDialog(self, path)
         except Exception as e:
             QMessageBox.critical(self, "Editor unavailable",
                                  f"Could not open the Markdown editor:\n{e}")
             return
-        if not hasattr(self, "_md_editors"):
-            self._md_editors = []
-        self._md_editors = [d for d in self._md_editors if d.isVisible()]
         self._md_editors.append(dlg)
         dlg.show()
         dlg.raise_()
@@ -2740,6 +2790,58 @@ class MainWindow(QMainWindow):
             self, "Edit Markdown File", start,
             "Markdown Files (*.md *.markdown);;All Files (*)")
         if path:
+            self._open_md_editor(path)
+
+    # ── Vault Notes sidebar ──────────────────────────────────────────────────
+    def toggle_vault_panel(self, checked):
+        self.vault_panel.setVisible(checked)
+        if checked:
+            self.refresh_vault_tree()
+
+    @staticmethod
+    def _dir_has_md(path):
+        for _root, _dirs, files in os.walk(path):
+            if any(f.lower().endswith((".md", ".markdown")) for f in files):
+                return True
+        return False
+
+    def refresh_vault_tree(self):
+        if not hasattr(self, "vault_tree"):
+            return
+        self.vault_tree.clear()
+        vp = self.vault_path
+        if not vp or not os.path.isdir(vp):
+            self.vault_tree.addTopLevelItem(
+                QTreeWidgetItem(["(no vault set — ☰ File ▸ ⚙ Set Vault Folder)"]))
+            return
+
+        def add_dir(parent, dirpath):
+            try:
+                entries = sorted(os.listdir(dirpath), key=str.lower)
+            except OSError:
+                return
+            for e in entries:
+                full = os.path.join(dirpath, e)
+                if os.path.isdir(full):
+                    if e.startswith(".") or e == "attachments" or not self._dir_has_md(full):
+                        continue
+                    node = QTreeWidgetItem([f"📁 {e}"])
+                    (parent.addChild if parent else self.vault_tree.addTopLevelItem)(node)
+                    add_dir(node, full)
+            for e in entries:
+                if e.lower().endswith((".md", ".markdown")):
+                    node = QTreeWidgetItem([f"📄 {os.path.splitext(e)[0]}"])
+                    node.setData(0, Qt.ItemDataRole.UserRole, os.path.join(dirpath, e))
+                    (parent.addChild if parent else self.vault_tree.addTopLevelItem)(node)
+
+        add_dir(None, vp)
+        self.vault_tree.expandToDepth(0)
+        if self.vault_tree.topLevelItemCount() == 0:
+            self.vault_tree.addTopLevelItem(QTreeWidgetItem(["(no .md notes yet)"]))
+
+    def on_vault_item_clicked(self, item, _col=0):
+        path = item.data(0, Qt.ItemDataRole.UserRole)
+        if path and os.path.isfile(path):
             self._open_md_editor(path)
 
     def closeEvent(self, event):

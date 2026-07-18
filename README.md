@@ -26,6 +26,7 @@ A beautiful, lightweight, and highly customizable PDF annotator built specifical
 - **Session Restoration:** Load an existing Markdown session to rebuild your annotation tree.
 - **Markdown Viewer:** Open and read any `.md` note from your Obsidian vault as formatted rich text — headings, quotes, notes, and embedded images render inline (no PDF required).
 - **Markdown Editor (Obsidian-style):** Create and edit `.md` notes with a live split-screen preview. Embed images **and video** exactly like Obsidian — drop a file in via 🖼/🎬 (it's copied into `attachments/` and linked as `![[...]]`), and it renders inline in the preview, with video playing right in the note. The preview matches your active theme.
+- **Vault Notes Sidebar:** Toggle 🗂 to show a collapsible sidebar listing every `.md` note in your vault (folders and all, `attachments/` hidden). Click a note to open it in the editor. Its visibility is remembered between sessions.
 - **Table of Contents:** Quick navigation through the built-in PDF outline.
 
 ## Easy Setup for New Users
