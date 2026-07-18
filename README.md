@@ -35,9 +35,12 @@ We provide a convenient script that automatically creates a Python virtual envir
 
 1. **Clone or Download** this repository.
 2. **Run `setup.bat`** (double-click it in Windows Explorer).
-   - This will automatically create a `venv` and run `pip install -r requirements.txt`.
+   - This creates a `venv`, upgrades `pip`, and runs `pip install -r requirements.txt`.
+   - The first run downloads `PyQt6-WebEngine` (used for the Markdown note preview), which is large — it may take a few minutes.
 3. **Run the Application:**
    - Double-click **`Run PDF Annotator.bat`** to start the app.
+
+> **Updating?** If you already had the app set up before the Markdown-notes features were added, just **re-run `setup.bat`** to install the new `PyQt6-WebEngine` dependency.
 
 *(If you are not on Windows, you can manually create a virtual environment, activate it, and run `pip install -r requirements.txt`, then run `python main.py`)*.
 
@@ -48,6 +51,14 @@ We provide a convenient script that automatically creates a Python virtual envir
 3. Select text in the PDF by clicking and dragging.
 4. Use **Keyboard Shortcuts** (e.g. `Alt+1`, `Ctrl+Shift+V`) to create an annotation from the selected text.
 5. Hit **F1** in the app to view the Cheatsheet of available keyboard shortcuts.
+
+### Working with Markdown Notes (Obsidian-style)
+
+1. Set your vault with **⚙ Set Vault Folder** (File menu), then toggle the **🗂 Vault Notes** sidebar to browse every `.md` note in it.
+2. **Click a note** in the sidebar to open it in the editor, or use **📝 New Markdown Note** / **✏ Edit Markdown Note** from the File menu.
+3. In the editor, write Markdown on the left and see a **live preview** on the right (toggle **Split / Editor / Preview**).
+4. Use the **🖼 Image** and **🎬 Video** buttons to embed media — the file is copied into `attachments/` and linked as `![[...]]`. Images render inline and **video plays right inside the note**, just like Obsidian.
+5. **📖 Open Markdown File** gives a quick, lightweight read-only view of any `.md` file.
 
 ## Customizing Commands / Shortcuts
 
@@ -64,6 +75,7 @@ The application requires Python 3.x and the packages listed in `requirements.txt
 - `PyQt6` (for the GUI)
 - `PyQt6-WebEngine` (for the Obsidian-style Markdown note preview with inline images & video)
 - `PyMuPDF` (for rendering and interacting with PDFs)
+- `pikepdf` (for the PDF repair / structural rebuild tool, `repair.py`)
 
 
 ## Architecture
