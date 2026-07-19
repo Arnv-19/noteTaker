@@ -143,6 +143,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction("📖 Open Markdown File…", self.open_markdown_view)
         file_menu.addAction("📝 New Markdown Note…", self.new_markdown_note)
         file_menu.addAction("✏ Edit Markdown Note…", self.edit_markdown_note)
+        file_menu.addAction("🌐 Web Browser", self.open_web_browser)
         file_menu.addSeparator()
         file_menu.addAction("⚙ Set Vault Folder…", self.set_vault)
         file_menu.addSeparator()
@@ -160,6 +161,11 @@ class MainWindow(QMainWindow):
         self.vault_toggle_action.setCheckable(True)
         self.vault_toggle_action.toggled.connect(self.toggle_vault_panel)
         toolbar.addAction(self.vault_toggle_action)
+
+        web_action = QAction("🌐", self)
+        web_action.setToolTip("Open a web browser tab (search, clip screenshots to notes)")
+        web_action.triggered.connect(self.open_web_browser)
+        toolbar.addAction(web_action)
 
         toolbar.addSeparator()
 
@@ -459,6 +465,7 @@ class MainWindow(QMainWindow):
         self.notes_tabs.setDocumentMode(True)
         self.notes_tabs.setMovable(True)
         self.notes_tabs.tabCloseRequested.connect(self.on_note_tab_close)
+        self.notes_tabs.currentChanged.connect(lambda _i: self.refresh_outline())
         self.center_stack.addWidget(self.notes_tabs)
         left_layout.addWidget(self.center_stack)
 
@@ -561,6 +568,7 @@ class MainWindow(QMainWindow):
         sc(self.shortcuts.get("next_page"), self.next_page)
         sc(self.shortcuts.get("cheatsheet"), self.show_cheatsheet)
         sc(self.shortcuts.get("screenshot"), self.start_screenshot_mode)
+        sc("Ctrl+W", self.close_center_tab)  # close current note/browser tab
 
     # ── Settings ─────────────────────────────────────────────────────────────
     def load_settings(self):
@@ -1939,6 +1947,12 @@ class MainWindow(QMainWindow):
             items_by_level[level] = item
             
     def on_outline_clicked(self, item, column):
+        if self.center_stack.currentWidget() is self.notes_tabs:
+            block = item.data(0, Qt.ItemDataRole.UserRole)
+            w = self.notes_tabs.currentWidget()
+            if block is not None and isinstance(w, MarkdownEditorWidget):
+                w.goto_block(block)
+            return
         page = item.data(0, Qt.ItemDataRole.UserRole)
         if page is not None:
             # PyMuPDF TOC pages are 1-based usually
@@ -2786,9 +2800,44 @@ class MainWindow(QMainWindow):
 
     def show_pdf_center(self):
         self.center_stack.setCurrentWidget(self.scroll_area)
+        self.refresh_outline()
 
     def show_notes_center(self):
         self.center_stack.setCurrentWidget(self.notes_tabs)
+        self.refresh_outline()
+
+    def refresh_outline(self):
+        """Outline tab shows the PDF's TOC, or the active note's headings."""
+        if self.center_stack.currentWidget() is self.notes_tabs:
+            w = self.notes_tabs.currentWidget()
+            if isinstance(w, MarkdownEditorWidget):
+                self.build_note_outline(w)
+            else:
+                self.outline_widget.clear()  # e.g. a browser tab
+        else:
+            self.load_toc()
+
+    def build_note_outline(self, widget):
+        self.outline_widget.clear()
+        items_by_level = {}
+        found = False
+        for i, line in enumerate(widget.editor.toPlainText().split("\n")):
+            mm = re.match(r"^(#{1,6})\s+(.*)$", line)
+            if not mm:
+                continue
+            found = True
+            level = len(mm.group(1))
+            item = QTreeWidgetItem([mm.group(2).strip() or "(untitled)"])
+            item.setData(0, Qt.ItemDataRole.UserRole, i)  # editor line/block number
+            parent = next((items_by_level[lv] for lv in range(level - 1, 0, -1)
+                           if lv in items_by_level), None)
+            (parent.addChild if parent else self.outline_widget.addTopLevelItem)(item)
+            items_by_level[level] = item
+            for lv in [lv for lv in items_by_level if lv > level]:
+                del items_by_level[lv]
+        if not found:
+            self.outline_widget.addTopLevelItem(QTreeWidgetItem(["(no headings yet)"]))
+        self.outline_widget.expandAll()
 
     def _open_md_editor(self, path=None, mode="Split"):
         """Open a note as a tab in the middle area (like PDFs). If the file
@@ -2819,6 +2868,34 @@ class MainWindow(QMainWindow):
         idx = self.notes_tabs.indexOf(widget)
         if idx >= 0:
             self.notes_tabs.setTabText(idx, f"📝 {text}")
+
+    def _update_browser_tab(self, widget, text):
+        idx = self.notes_tabs.indexOf(widget)
+        if idx >= 0:
+            self.notes_tabs.setTabText(idx, f"🌐 {text}")
+
+    def open_web_browser(self, start_url="https://www.google.com"):
+        try:
+            page = WebBrowserWidget(self, start_url=start_url)
+        except Exception as e:
+            QMessageBox.critical(self, "Browser unavailable",
+                                 f"Could not open the web browser:\n{e}")
+            return None
+        idx = self.notes_tabs.addTab(page, "🌐 Web")
+        self.notes_tabs.setCurrentIndex(idx)
+        self.show_notes_center()
+        self.vault_toggle_action.setChecked(False)
+        page.url_bar.setFocus()
+        return page
+
+    def close_center_tab(self, widget=None):
+        """Close a specific note/browser tab, or the current one (Ctrl+W)."""
+        if self.center_stack.currentWidget() is not self.notes_tabs:
+            return
+        idx = (self.notes_tabs.indexOf(widget) if widget is not None
+               else self.notes_tabs.currentIndex())
+        if idx >= 0:
+            self.on_note_tab_close(idx)
 
     def on_note_tab_close(self, idx):
         w = self.notes_tabs.widget(idx)
@@ -3062,7 +3139,12 @@ def note_md_to_html(raw, base_dir, vault_path, theme_name):
         ext = os.path.splitext(name)[1].lower()
         url = _resolve_media_url(name, base_dir, vault_path)
         if ext in VIDEO_EXTS:
-            media.append(f'<video controls preload="metadata" src="{url}"></video>')
+            media.append(
+                f'<video controls preload="metadata" src="{url}" '
+                f'onerror="this.insertAdjacentHTML(\'afterend\','
+                f'\'<div style=&quot;opacity:.7;font-size:13px&quot;>⚠ '
+                f'{os.path.basename(name)} — this format needs an external player '
+                f'(Qt has no H.264/MP4 codec)</div>\')"></video>')
             return f"\n\nMEDIATOKEN{len(media) - 1}ENDTOKEN\n\n"
         if ext in AUDIO_EXTS:
             media.append(f'<audio controls preload="metadata" src="{url}"></audio>')
@@ -3122,19 +3204,40 @@ def note_md_to_html(raw, base_dir, vault_path, theme_name):
 </style></head><body>{inner}</body></html>"""
 
 
+def open_in_system_player(path):
+    """Open a file in the OS default app (VLC/Media Player/etc.). Zero in-app
+    CPU and supports every codec — the reliable path for H.264/MP4 lectures
+    that Qt's codec-free Chromium build can't decode."""
+    from PyQt6.QtGui import QDesktopServices
+    QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(path)))
+
+
 class MediaPlayerDialog(QDialog):
-    """Plays a video/audio file (or shows an image) in a themed Chromium view.
-    Lets lecture recordings etc. open straight from the Notes sidebar."""
+    """Plays a video/audio file (or shows an image) in a themed Chromium view,
+    with a one-click fallback to the system player. Opens straight from the
+    Notes sidebar — handy for downloaded lectures."""
 
     def __init__(self, owner, path):
         super().__init__(owner)
+        self.path = path
         self.setWindowTitle(os.path.basename(path))
-        self.resize(960, 620)
+        self.resize(960, 640)
         from PyQt6.QtWebEngineWidgets import QWebEngineView
         from PyQt6.QtWebEngineCore import QWebEngineSettings
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        ext = os.path.splitext(path)[1].lower()
+        if ext in (VIDEO_EXTS | AUDIO_EXTS):
+            bar = QToolBar()
+            act = bar.addAction("▶ Open in system player",
+                                lambda: open_in_system_player(path))
+            act.setToolTip("Play in your default media app — works with every "
+                           "format (e.g. H.264/MP4 that won't play inline here)")
+            layout.addWidget(bar)
+
         self.web = QWebEngineView()
         ws = self.web.settings()
         ws.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
@@ -3142,27 +3245,197 @@ class MediaPlayerDialog(QDialog):
         layout.addWidget(self.web)
 
         url = _file_url(path)
-        ext = os.path.splitext(path)[1].lower()
-        if ext in VIDEO_EXTS:
-            tag = f'<video controls autoplay src="{url}"></video>'
-        elif ext in AUDIO_EXTS:
-            tag = f'<audio controls autoplay src="{url}"></audio>'
-        else:
-            tag = f'<img src="{url}">'
         t = THEMES.get(owner.theme_name, THEMES["AMOLED"])
         bg = "rgb(%d,%d,%d)" % t["window"]
+        fg = "rgb(%d,%d,%d)" % t["text"]
+        if ext in VIDEO_EXTS:
+            # onerror: if the codec isn't supported, guide the user to the button
+            media = (f'<video controls autoplay src="{url}" '
+                     f'onerror="document.getElementById(\'err\').style.display=\'block\'">'
+                     f'</video>'
+                     f'<div id="err" style="display:none;color:{fg};padding:16px;'
+                     f'text-align:center;max-width:480px">⚠ This video format can\'t '
+                     f'play here (Qt ships without H.264/MP4 codecs).<br>'
+                     f'Use <b>▶ Open in system player</b> above.</div>')
+        elif ext in AUDIO_EXTS:
+            media = f'<audio controls autoplay src="{url}"></audio>'
+        else:
+            media = f'<img src="{url}">'
         self.web.setHtml(
             f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>
             html,body {{ margin:0; height:100%; background:{bg};
-              display:flex; align-items:center; justify-content:center; }}
+              display:flex; align-items:center; justify-content:center;
+              flex-direction:column;
+              font-family:-apple-system,'Segoe UI',sans-serif; }}
             video,img {{ max-width:100%; max-height:100vh; }}
             audio {{ width:90%; }}
-            </style></head><body>{tag}</body></html>""",
+            </style></head><body>{media}</body></html>""",
             QUrl.fromLocalFile(os.path.dirname(os.path.abspath(path)) + os.sep))
 
     def closeEvent(self, e):
         self.web.setHtml("")  # stop playback
         e.accept()
+
+
+class WebBrowserWidget(QWidget):
+    """A lightweight in-app browser tab (reuses the WebEngine we already ship).
+    Type a URL or a search; 📸 screenshots the page into a Markdown note.
+    Only spun up on demand, so it costs nothing until you open it."""
+
+    path = None  # so the notes-tab plumbing (dedup, close) treats it uniformly
+
+    def __init__(self, owner, start_url="https://www.google.com"):
+        super().__init__()
+        self.owner = owner
+        self._web_proxy = None
+        from PyQt6.QtWebEngineWidgets import QWebEngineView
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        bar = QToolBar()
+        bar.addAction("◀", lambda: self.web.back()).setToolTip("Back")
+        bar.addAction("▶", lambda: self.web.forward()).setToolTip("Forward")
+        bar.addAction("⟳", lambda: self.web.reload()).setToolTip("Reload")
+        self.url_bar = QLineEdit()
+        self.url_bar.setPlaceholderText("Search Google or type a URL, then Enter…")
+        self.url_bar.returnPressed.connect(self.navigate)
+        bar.addWidget(self.url_bar)
+        bar.addAction("📋 To Note", self.capture_selection_to_note).setToolTip(
+            "Send the selected text straight to Quick Notes.md (Ctrl+N) — "
+            "no copy-paste needed")
+        bar.addAction("📸 Clip", self.screenshot_to_note).setToolTip(
+            "Screenshot this page into a Markdown note")
+        bar.addAction("🔗 Open externally", self.open_in_system_browser).setToolTip(
+            "Open the current page in your normal browser")
+        bar.addAction("✖ Close", lambda: self.owner.close_center_tab(self)).setToolTip(
+            "Close this browser tab (Ctrl+W)")
+        root.addWidget(bar)
+
+        self.web = QWebEngineView()
+        self.web.urlChanged.connect(
+            lambda u: self.url_bar.setText(u.toString()))
+        self.web.titleChanged.connect(self._on_title)
+        # Links that open a new window/tab (target=_blank, e.g. YouTube) used
+        # to spawn a bare, uncloseable window — keep them as in-app tabs.
+        self.web.page().newWindowRequested.connect(self._on_new_window)
+        # Catch Ctrl+N over the page to capture the selection in one step
+        self.web.loadFinished.connect(self._arm_key_capture)
+        root.addWidget(self.web)
+        if start_url:
+            self.web.setUrl(QUrl(start_url))
+
+    def _arm_key_capture(self, _ok=True):
+        fp = self.web.focusProxy()
+        if fp is not None and fp is not self._web_proxy:
+            fp.installEventFilter(self)
+            self._web_proxy = fp
+
+    def eventFilter(self, obj, event):
+        if obj is self._web_proxy and event.type() in (
+                QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress):
+            seq = QKeySequence(event.keyCombination())
+            if QKeySequence("Ctrl+N").matches(seq) == \
+                    QKeySequence.SequenceMatch.ExactMatch:
+                if event.type() == QEvent.Type.ShortcutOverride:
+                    event.accept()  # take Ctrl+N from the global annotation key
+                else:
+                    self.capture_selection_to_note()
+                return True
+        return super().eventFilter(obj, event)
+
+    def _on_new_window(self, request):
+        new_widget = self.owner.open_web_browser(start_url=None)
+        if new_widget is not None:
+            request.openIn(new_widget.web.page())
+
+    def capture_selection_to_note(self):
+        """One-step capture: append the page's selected text (with source
+        link) to Quick Notes.md and open it in the editor. With nothing
+        selected, just open Quick Notes.md so you can type a normal note."""
+        base = self.owner.notes_root or self.owner.vault_path
+        if not base:
+            QMessageBox.information(
+                self, "Choose a folder first",
+                "Browse a folder or set a vault (🗂 sidebar ▸ 📂) so notes have "
+                "somewhere to live.")
+            return
+        note_path = os.path.join(base, "Quick Notes.md")
+        sel = self.web.page().selectedText().strip()
+        if sel:
+            header = "" if os.path.exists(note_path) else "# Quick Notes\n"
+            src = self.web.title() or self.web.url().toString()
+            quoted = "\n".join("> " + ln for ln in sel.split("\n"))
+            block = (f"\n{quoted}\n>\n> — [{src}]({self.web.url().toString()})\n")
+            try:
+                with open(note_path, "a", encoding="utf-8") as fh:
+                    fh.write(header + block)
+            except Exception as e:
+                QMessageBox.warning(self, "Save failed", str(e))
+                return
+            self.owner.statusBar().showMessage("Added selection to Quick Notes.md", 3000)
+        self.owner.refresh_vault_tree()
+        # Open in the source editor so heading keys (Alt+1…) work right away
+        self.owner._open_md_editor(note_path, mode="Editor")
+
+    def _on_title(self, title):
+        self.owner._update_browser_tab(self, (title or "Web")[:22])
+
+    def navigate(self):
+        text = self.url_bar.text().strip()
+        if not text:
+            return
+        # Looks like a URL? (has scheme, or a dotted host with no spaces)
+        if re.match(r"^[a-zA-Z][\w+.-]*://", text):
+            url = text
+        elif " " not in text and re.search(r"\.[a-zA-Z]{2,}", text):
+            url = "https://" + text
+        else:
+            from urllib.parse import quote_plus
+            url = "https://www.google.com/search?q=" + quote_plus(text)
+        self.web.setUrl(QUrl(url))
+
+    def open_in_system_browser(self):
+        from PyQt6.QtGui import QDesktopServices
+        QDesktopServices.openUrl(self.web.url())
+
+    def screenshot_to_note(self):
+        base = self.owner.notes_root or self.owner.vault_path
+        if not base:
+            QMessageBox.information(
+                self, "Choose a folder first",
+                "Browse a folder or set a vault (🗂 sidebar ▸ 📂) so clips have "
+                "somewhere to be saved.")
+            return
+        att = os.path.join(base, "attachments")
+        os.makedirs(att, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        fname = f"webclip_{stamp}.png"
+        pix = self.web.grab()  # capture the rendered page (visible area)
+        if not pix.save(os.path.join(att, fname), "PNG"):
+            QMessageBox.warning(self, "Screenshot failed", "Could not save the image.")
+            return
+        # Append the clip to a single "Web Clippings.md" note and open it
+        note_path = os.path.join(base, "Web Clippings.md")
+        title = self.web.title() or self.web.url().toString()
+        block = (f"\n## {title}\n\n"
+                 f"<{self.web.url().toString()}>\n\n"
+                 f"![[attachments/{fname}]]\n")
+        header = "" if os.path.exists(note_path) else "# Web Clippings\n"
+        try:
+            with open(note_path, "a", encoding="utf-8") as fh:
+                fh.write(header + block)
+        except Exception as e:
+            QMessageBox.warning(self, "Save failed", str(e))
+            return
+        self.owner.statusBar().showMessage(f"Clipped to Web Clippings.md", 3000)
+        self.owner.refresh_vault_tree()
+        self.owner._open_md_editor(note_path, mode="Preview")
+
+    def maybe_close(self):
+        self.web.setUrl(QUrl("about:blank"))  # stop media/network
+        return True
 
 
 class MarkdownEditorWidget(QWidget):
@@ -3290,6 +3563,23 @@ class MarkdownEditorWidget(QWidget):
         html = note_md_to_html(self.editor.toPlainText(), self._base_dir(),
                                self.owner.vault_path, self.owner.theme_name)
         self.web.setHtml(html, QUrl.fromLocalFile(self._base_dir() + os.sep))
+        # Keep the Outline panel in sync with this note's headings
+        if getattr(self.owner, "notes_tabs", None) is not None \
+                and self.owner.notes_tabs.currentWidget() is self:
+            self.owner.refresh_outline()
+
+    def goto_block(self, block_no):
+        """Scroll the editor to a heading line (from the Outline panel)."""
+        if self.mode_combo.currentText() == "Preview":
+            self.mode_combo.setCurrentText("Editor")
+        block = self.editor.document().findBlockByNumber(block_no)
+        if not block.isValid():
+            return
+        c = self.editor.textCursor()
+        c.setPosition(block.position())
+        self.editor.setTextCursor(c)
+        self.editor.centerCursor()
+        self.editor.setFocus()
 
     def set_mode(self, mode):
         self.editor.setVisible(mode in ("Split", "Editor"))
@@ -3316,7 +3606,9 @@ class MarkdownEditorWidget(QWidget):
         if obj is self._web_proxy and \
                 event.type() == QEvent.Type.MouseButtonDblClick:
             if self.mode_combo.currentText() == "Preview":
-                self.mode_combo.setCurrentText("Split")
+                # Obsidian-style: reading view -> raw markdown source on edit
+                self.mode_combo.setCurrentText("Editor")
+                self.editor.setFocus()
                 return True
             return False
         if obj is self.editor and event.type() in (
@@ -3339,8 +3631,16 @@ class MarkdownEditorWidget(QWidget):
         self.mode_combo.setCurrentText(
             "Preview" if self.mode_combo.currentText() != "Preview" else "Editor")
 
+    def _ensure_editable(self):
+        """Formatting needs the editor visible; a click from Preview should
+        drop you into the raw-markdown editor rather than silently doing
+        nothing (matches Obsidian's reading -> editing switch)."""
+        if self.mode_combo.currentText() == "Preview":
+            self.mode_combo.setCurrentText("Editor")
+
     def toggle_heading(self, level):
         """Set (or toggle off) `level` heading on every selected line."""
+        self._ensure_editable()
         cur = self.editor.textCursor()
         doc = self.editor.document()
         start_block = doc.findBlock(cur.selectionStart())
@@ -3365,6 +3665,7 @@ class MarkdownEditorWidget(QWidget):
         cur.endEditBlock()
 
     def toggle_line_prefix(self, prefix):
+        self._ensure_editable()
         cur = self.editor.textCursor()
         doc = self.editor.document()
         start_block = doc.findBlock(cur.selectionStart())
@@ -3391,6 +3692,7 @@ class MarkdownEditorWidget(QWidget):
         """Wrap the selection in `marker` (bold/italic), or unwrap if already
         wrapped. With no selection, insert the markers and park the cursor
         between them."""
+        self._ensure_editable()
         cur = self.editor.textCursor()
         if not cur.hasSelection():
             cur.insertText(marker + marker)
