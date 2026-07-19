@@ -3287,6 +3287,7 @@ class WebBrowserWidget(QWidget):
     def __init__(self, owner, start_url="https://www.google.com"):
         super().__init__()
         self.owner = owner
+        self._web_proxy = None
         from PyQt6.QtWebEngineWidgets import QWebEngineView
 
         root = QVBoxLayout(self)
@@ -3301,6 +3302,9 @@ class WebBrowserWidget(QWidget):
         self.url_bar.setPlaceholderText("Search Google or type a URL, then Enter…")
         self.url_bar.returnPressed.connect(self.navigate)
         bar.addWidget(self.url_bar)
+        bar.addAction("📋 To Note", self.capture_selection_to_note).setToolTip(
+            "Send the selected text straight to Quick Notes.md (Ctrl+N) — "
+            "no copy-paste needed")
         bar.addAction("📸 Clip", self.screenshot_to_note).setToolTip(
             "Screenshot this page into a Markdown note")
         bar.addAction("🔗 Open externally", self.open_in_system_browser).setToolTip(
@@ -3316,14 +3320,64 @@ class WebBrowserWidget(QWidget):
         # Links that open a new window/tab (target=_blank, e.g. YouTube) used
         # to spawn a bare, uncloseable window — keep them as in-app tabs.
         self.web.page().newWindowRequested.connect(self._on_new_window)
+        # Catch Ctrl+N over the page to capture the selection in one step
+        self.web.loadFinished.connect(self._arm_key_capture)
         root.addWidget(self.web)
         if start_url:
             self.web.setUrl(QUrl(start_url))
+
+    def _arm_key_capture(self, _ok=True):
+        fp = self.web.focusProxy()
+        if fp is not None and fp is not self._web_proxy:
+            fp.installEventFilter(self)
+            self._web_proxy = fp
+
+    def eventFilter(self, obj, event):
+        if obj is self._web_proxy and event.type() in (
+                QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress):
+            seq = QKeySequence(event.keyCombination())
+            if QKeySequence("Ctrl+N").matches(seq) == \
+                    QKeySequence.SequenceMatch.ExactMatch:
+                if event.type() == QEvent.Type.ShortcutOverride:
+                    event.accept()  # take Ctrl+N from the global annotation key
+                else:
+                    self.capture_selection_to_note()
+                return True
+        return super().eventFilter(obj, event)
 
     def _on_new_window(self, request):
         new_widget = self.owner.open_web_browser(start_url=None)
         if new_widget is not None:
             request.openIn(new_widget.web.page())
+
+    def capture_selection_to_note(self):
+        """One-step capture: append the page's selected text (with source
+        link) to Quick Notes.md and open it in the editor. With nothing
+        selected, just open Quick Notes.md so you can type a normal note."""
+        base = self.owner.notes_root or self.owner.vault_path
+        if not base:
+            QMessageBox.information(
+                self, "Choose a folder first",
+                "Browse a folder or set a vault (🗂 sidebar ▸ 📂) so notes have "
+                "somewhere to live.")
+            return
+        note_path = os.path.join(base, "Quick Notes.md")
+        sel = self.web.page().selectedText().strip()
+        if sel:
+            header = "" if os.path.exists(note_path) else "# Quick Notes\n"
+            src = self.web.title() or self.web.url().toString()
+            quoted = "\n".join("> " + ln for ln in sel.split("\n"))
+            block = (f"\n{quoted}\n>\n> — [{src}]({self.web.url().toString()})\n")
+            try:
+                with open(note_path, "a", encoding="utf-8") as fh:
+                    fh.write(header + block)
+            except Exception as e:
+                QMessageBox.warning(self, "Save failed", str(e))
+                return
+            self.owner.statusBar().showMessage("Added selection to Quick Notes.md", 3000)
+        self.owner.refresh_vault_tree()
+        # Open in the source editor so heading keys (Alt+1…) work right away
+        self.owner._open_md_editor(note_path, mode="Editor")
 
     def _on_title(self, title):
         self.owner._update_browser_tab(self, (title or "Web")[:22])
