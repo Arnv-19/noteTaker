@@ -3553,8 +3553,15 @@ class MarkdownEditorWidget(QWidget):
         self.mode_combo.setCurrentText(
             "Preview" if self.mode_combo.currentText() != "Preview" else "Editor")
 
+    def _ensure_editable(self):
+        """Formatting needs the editor visible; a click from Preview should
+        drop you into editing rather than silently doing nothing."""
+        if not self.editor.isVisible():
+            self.mode_combo.setCurrentText("Split")
+
     def toggle_heading(self, level):
         """Set (or toggle off) `level` heading on every selected line."""
+        self._ensure_editable()
         cur = self.editor.textCursor()
         doc = self.editor.document()
         start_block = doc.findBlock(cur.selectionStart())
@@ -3579,6 +3586,7 @@ class MarkdownEditorWidget(QWidget):
         cur.endEditBlock()
 
     def toggle_line_prefix(self, prefix):
+        self._ensure_editable()
         cur = self.editor.textCursor()
         doc = self.editor.document()
         start_block = doc.findBlock(cur.selectionStart())
@@ -3605,6 +3613,7 @@ class MarkdownEditorWidget(QWidget):
         """Wrap the selection in `marker` (bold/italic), or unwrap if already
         wrapped. With no selection, insert the markers and park the cursor
         between them."""
+        self._ensure_editable()
         cur = self.editor.textCursor()
         if not cur.hasSelection():
             cur.insertText(marker + marker)
