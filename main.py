@@ -3212,6 +3212,253 @@ def open_in_system_player(path):
     QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(path)))
 
 
+class _MdFormatMixin:
+    """Obsidian-style markdown formatting shared by the note editor tab and
+    the browser's side-note pane. Heading keys reuse the app's configured
+    shortcuts; keys are claimed from global shortcuts via ShortcutOverride."""
+
+    def _format_actions(self):
+        acts = {}
+        for lvl in range(1, 5):
+            keys = self.owner.shortcuts.get(f"h{lvl}")
+            if keys:
+                acts[keys] = lambda n=lvl: self.toggle_heading(n)
+        acts["Ctrl+B"] = lambda: self.wrap_selection("**")
+        acts["Ctrl+I"] = lambda: self.wrap_selection("*")
+        acts["Ctrl+Shift+Q"] = lambda: self.toggle_line_prefix("> ")
+        acts["Ctrl+Shift+L"] = lambda: self.toggle_line_prefix("- ")
+        if hasattr(self, "toggle_edit_preview"):
+            acts["Ctrl+E"] = self.toggle_edit_preview
+        return acts
+
+    def eventFilter(self, obj, event):
+        if getattr(self, "_web_proxy", None) is obj and \
+                event.type() == QEvent.Type.MouseButtonDblClick:
+            if getattr(self, "mode_combo", None) is not None \
+                    and self.mode_combo.currentText() == "Preview":
+                # Obsidian-style: reading view -> raw markdown source on edit
+                self.mode_combo.setCurrentText("Editor")
+                self.editor.setFocus()
+                return True
+            return False
+        if obj is self.editor and event.type() in (
+                QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress):
+            if event.key() in (Qt.Key.Key_Control, Qt.Key.Key_Shift,
+                               Qt.Key.Key_Alt, Qt.Key.Key_Meta):
+                return super().eventFilter(obj, event)
+            pressed = QKeySequence(event.keyCombination())
+            for keys, action in self._format_actions().items():
+                if QKeySequence(keys).matches(pressed) == \
+                        QKeySequence.SequenceMatch.ExactMatch:
+                    if event.type() == QEvent.Type.ShortcutOverride:
+                        event.accept()  # claim the key from global shortcuts
+                    else:
+                        action()
+                    return True
+        return super().eventFilter(obj, event)
+
+    def _ensure_editable(self):
+        """Formatting from Preview should drop into the raw-markdown editor
+        rather than silently doing nothing. No-op in editor-only panes."""
+        if getattr(self, "mode_combo", None) is not None \
+                and self.mode_combo.currentText() == "Preview":
+            self.mode_combo.setCurrentText("Editor")
+
+    def toggle_heading(self, level):
+        """Set (or toggle off) `level` heading on every selected line."""
+        self._ensure_editable()
+        cur = self.editor.textCursor()
+        doc = self.editor.document()
+        start_block = doc.findBlock(cur.selectionStart())
+        end_block = doc.findBlock(cur.selectionEnd())
+        blocks = []
+        b = start_block
+        while True:
+            blocks.append(b)
+            if b == end_block:
+                break
+            b = b.next()
+        prefix = "#" * level + " "
+        all_at_level = all(
+            re.match(r"^#{%d} " % level, bl.text()) for bl in blocks)
+        cur.beginEditBlock()
+        for bl in blocks:
+            c = self.editor.textCursor()
+            c.setPosition(bl.position())
+            c.movePosition(c.MoveOperation.EndOfBlock, c.MoveMode.KeepAnchor)
+            stripped = re.sub(r"^#{1,6} ", "", bl.text())
+            c.insertText(stripped if all_at_level else prefix + stripped)
+        cur.endEditBlock()
+
+    def toggle_line_prefix(self, prefix):
+        self._ensure_editable()
+        cur = self.editor.textCursor()
+        doc = self.editor.document()
+        start_block = doc.findBlock(cur.selectionStart())
+        end_block = doc.findBlock(cur.selectionEnd())
+        blocks = []
+        b = start_block
+        while True:
+            blocks.append(b)
+            if b == end_block:
+                break
+            b = b.next()
+        all_prefixed = all(bl.text().startswith(prefix) for bl in blocks)
+        cur.beginEditBlock()
+        for bl in blocks:
+            c = self.editor.textCursor()
+            c.setPosition(bl.position())
+            c.movePosition(c.MoveOperation.EndOfBlock, c.MoveMode.KeepAnchor)
+            t = bl.text()
+            c.insertText(t[len(prefix):] if all_prefixed and t.startswith(prefix)
+                         else prefix + t)
+        cur.endEditBlock()
+
+    def wrap_selection(self, marker):
+        """Wrap the selection in `marker` (bold/italic), or unwrap if already
+        wrapped. With no selection, insert the markers and park the cursor
+        between them."""
+        self._ensure_editable()
+        cur = self.editor.textCursor()
+        if not cur.hasSelection():
+            cur.insertText(marker + marker)
+            cur.movePosition(cur.MoveOperation.Left,
+                             cur.MoveMode.MoveAnchor, len(marker))
+            self.editor.setTextCursor(cur)
+            return
+        text = cur.selectedText()
+        if text.startswith(marker) and text.endswith(marker) \
+                and len(text) >= 2 * len(marker):
+            cur.insertText(text[len(marker):-len(marker)])
+        else:
+            cur.insertText(f"{marker}{text}{marker}")
+
+
+class SideNoteWidget(_MdFormatMixin, QWidget):
+    """The browser tab's side-by-side note pane: a real .md file of your
+    choosing, visible next to the web page. Captures append here; the file
+    auto-saves once it has a path, and can be reopened later to continue."""
+
+    def __init__(self, owner):
+        super().__init__()
+        self.owner = owner
+        self.path = None
+        self._dirty = False
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        bar = QToolBar()
+        self.name_label = QLabel(" 📄 (unsaved note) ")
+        bar.addWidget(self.name_label)
+        bar.addAction("📂 Open…", self.open_note).setToolTip(
+            "Open an existing .md file to continue it")
+        bar.addAction("🆕 New", self.new_note).setToolTip("Start a fresh note")
+        bar.addAction("💾 Save", self.save)
+        bar.addAction("⨯", self.hide).setToolTip("Hide the note pane")
+        root.addWidget(bar)
+
+        self.editor = QPlainTextEdit()
+        self.editor.setPlaceholderText(
+            "Your capture note.\nSelect text on the page and press Ctrl+N — "
+            "it lands here.\n📂 Open an existing .md to continue it.")
+        mono = QFont("Consolas")
+        mono.setStyleHint(QFont.StyleHint.Monospace)
+        mono.setPointSize(10)
+        self.editor.setFont(mono)
+        self.editor.installEventFilter(self)
+        self.editor.textChanged.connect(self._on_changed)
+        root.addWidget(self.editor)
+
+    def _on_changed(self):
+        self._dirty = True
+        self._refresh_label()
+
+    def _refresh_label(self):
+        name = os.path.basename(self.path) if self.path else "(unsaved note)"
+        self.name_label.setText(f" 📄 {name}{' •' if self._dirty else ''} ")
+
+    def open_note(self):
+        if not self.maybe_discard():
+            return
+        start = (self.owner.notes_root or self.owner.vault_path
+                 or os.path.expanduser("~"))
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open note to continue", start,
+            "Markdown Files (*.md *.markdown)")
+        if path:
+            self.load_file(path)
+
+    def load_file(self, path):
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                self.editor.setPlainText(fh.read())
+        except Exception as e:
+            QMessageBox.warning(self, "Open failed", str(e))
+            return
+        self.path = path
+        self._dirty = False
+        self._refresh_label()
+        c = self.editor.textCursor()
+        c.movePosition(c.MoveOperation.End)
+        self.editor.setTextCursor(c)
+
+    def new_note(self):
+        if not self.maybe_discard():
+            return
+        self.editor.clear()
+        self.path = None
+        self._dirty = False
+        self._refresh_label()
+
+    def maybe_discard(self):
+        """True if it's OK to replace/close the current content."""
+        if self._dirty:
+            r = QMessageBox.question(
+                self, "Unsaved changes", "Save this note first?",
+                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel)
+            if r == QMessageBox.StandardButton.Save:
+                self.save()
+                return not self._dirty
+            if r == QMessageBox.StandardButton.Cancel:
+                return False
+        return True
+
+    def save(self):
+        if not self.path:
+            start = os.path.join(
+                self.owner.notes_root or self.owner.vault_path
+                or os.path.expanduser("~"), "Web Notes.md")
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Save note", start, "Markdown (*.md)")
+            if not path:
+                return
+            if not path.lower().endswith((".md", ".markdown")):
+                path += ".md"
+            self.path = path
+        try:
+            with open(self.path, "w", encoding="utf-8") as fh:
+                fh.write(self.editor.toPlainText())
+            self._dirty = False
+            self._refresh_label()
+            self.owner.statusBar().showMessage(
+                f"Saved {os.path.basename(self.path)}", 3000)
+            self.owner.refresh_vault_tree()
+        except Exception as e:
+            QMessageBox.warning(self, "Save failed", str(e))
+
+    def append_block(self, text):
+        c = self.editor.textCursor()
+        c.movePosition(c.MoveOperation.End)
+        self.editor.setTextCursor(c)
+        self.editor.insertPlainText(text)
+        self.editor.centerCursor()
+        if self.path:
+            self.save()  # keep the file on disk current
+
+
 class MediaPlayerDialog(QDialog):
     """Plays a video/audio file (or shows an image) in a themed Chromium view,
     with a one-click fallback to the system player. Opens straight from the
@@ -3302,11 +3549,13 @@ class WebBrowserWidget(QWidget):
         self.url_bar.setPlaceholderText("Search Google or type a URL, then Enter…")
         self.url_bar.returnPressed.connect(self.navigate)
         bar.addWidget(self.url_bar)
+        bar.addAction("📝 Note pane", self.toggle_side_note).setToolTip(
+            "Show/hide the side-by-side note next to the page")
         bar.addAction("📋 To Note", self.capture_selection_to_note).setToolTip(
-            "Send the selected text straight to Quick Notes.md (Ctrl+N) — "
+            "Send the selected text into the side note (Ctrl+N) — "
             "no copy-paste needed")
         bar.addAction("📸 Clip", self.screenshot_to_note).setToolTip(
-            "Screenshot this page into a Markdown note")
+            "Screenshot this page into the side note")
         bar.addAction("🔗 Open externally", self.open_in_system_browser).setToolTip(
             "Open the current page in your normal browser")
         bar.addAction("✖ Close", lambda: self.owner.close_center_tab(self)).setToolTip(
@@ -3322,9 +3571,21 @@ class WebBrowserWidget(QWidget):
         self.web.page().newWindowRequested.connect(self._on_new_window)
         # Catch Ctrl+N over the page to capture the selection in one step
         self.web.loadFinished.connect(self._arm_key_capture)
-        root.addWidget(self.web)
+
+        # Side-by-side: page on the left, your note on the right
+        self.split = QSplitter(Qt.Orientation.Horizontal)
+        self.split.addWidget(self.web)
+        self.side_note = SideNoteWidget(owner)
+        self.split.addWidget(self.side_note)
+        self.split.setSizes([660, 360])
+        self.side_note.hide()  # appears on first capture or via 📝 Note pane
+        root.addWidget(self.split, 1)
+
         if start_url:
             self.web.setUrl(QUrl(start_url))
+
+    def toggle_side_note(self):
+        self.side_note.setVisible(self.side_note.isHidden())
 
     def _arm_key_capture(self, _ok=True):
         fp = self.web.focusProxy()
@@ -3352,32 +3613,20 @@ class WebBrowserWidget(QWidget):
 
     def capture_selection_to_note(self):
         """One-step capture: append the page's selected text (with source
-        link) to Quick Notes.md and open it in the editor. With nothing
-        selected, just open Quick Notes.md so you can type a normal note."""
-        base = self.owner.notes_root or self.owner.vault_path
-        if not base:
-            QMessageBox.information(
-                self, "Choose a folder first",
-                "Browse a folder or set a vault (🗂 sidebar ▸ 📂) so notes have "
-                "somewhere to live.")
-            return
-        note_path = os.path.join(base, "Quick Notes.md")
+        link) to the side note shown next to the page. The side note is any
+        .md file you choose (📂 Open) and auto-saves once it has one. With
+        nothing selected, just show the pane so you can type."""
+        if self.side_note.isHidden():
+            self.side_note.show()
         sel = self.web.page().selectedText().strip()
-        if sel:
-            header = "" if os.path.exists(note_path) else "# Quick Notes\n"
-            src = self.web.title() or self.web.url().toString()
-            quoted = "\n".join("> " + ln for ln in sel.split("\n"))
-            block = (f"\n{quoted}\n>\n> — [{src}]({self.web.url().toString()})\n")
-            try:
-                with open(note_path, "a", encoding="utf-8") as fh:
-                    fh.write(header + block)
-            except Exception as e:
-                QMessageBox.warning(self, "Save failed", str(e))
-                return
-            self.owner.statusBar().showMessage("Added selection to Quick Notes.md", 3000)
-        self.owner.refresh_vault_tree()
-        # Open in the source editor so heading keys (Alt+1…) work right away
-        self.owner._open_md_editor(note_path, mode="Editor")
+        if not sel:
+            self.side_note.editor.setFocus()
+            return
+        src = self.web.title() or self.web.url().toString()
+        quoted = "\n".join("> " + ln for ln in sel.split("\n"))
+        self.side_note.append_block(
+            f"\n{quoted}\n>\n> — [{src}]({self.web.url().toString()})\n")
+        self.owner.statusBar().showMessage("Captured selection to side note", 2000)
 
     def _on_title(self, title):
         self.owner._update_browser_tab(self, (title or "Web")[:22])
@@ -3401,12 +3650,17 @@ class WebBrowserWidget(QWidget):
         QDesktopServices.openUrl(self.web.url())
 
     def screenshot_to_note(self):
-        base = self.owner.notes_root or self.owner.vault_path
+        # Attachments live next to the side note's file if it has one,
+        # otherwise in the browsed folder / vault.
+        if self.side_note.path:
+            base = os.path.dirname(os.path.abspath(self.side_note.path))
+        else:
+            base = self.owner.notes_root or self.owner.vault_path
         if not base:
             QMessageBox.information(
                 self, "Choose a folder first",
-                "Browse a folder or set a vault (🗂 sidebar ▸ 📂) so clips have "
-                "somewhere to be saved.")
+                "Save the side note, browse a folder, or set a vault so clips "
+                "have somewhere to be saved.")
             return
         att = os.path.join(base, "attachments")
         os.makedirs(att, exist_ok=True)
@@ -3416,33 +3670,27 @@ class WebBrowserWidget(QWidget):
         if not pix.save(os.path.join(att, fname), "PNG"):
             QMessageBox.warning(self, "Screenshot failed", "Could not save the image.")
             return
-        # Append the clip to a single "Web Clippings.md" note and open it
-        note_path = os.path.join(base, "Web Clippings.md")
+        if self.side_note.isHidden():
+            self.side_note.show()
         title = self.web.title() or self.web.url().toString()
-        block = (f"\n## {title}\n\n"
-                 f"<{self.web.url().toString()}>\n\n"
-                 f"![[attachments/{fname}]]\n")
-        header = "" if os.path.exists(note_path) else "# Web Clippings\n"
-        try:
-            with open(note_path, "a", encoding="utf-8") as fh:
-                fh.write(header + block)
-        except Exception as e:
-            QMessageBox.warning(self, "Save failed", str(e))
-            return
-        self.owner.statusBar().showMessage(f"Clipped to Web Clippings.md", 3000)
-        self.owner.refresh_vault_tree()
-        self.owner._open_md_editor(note_path, mode="Preview")
+        self.side_note.append_block(
+            f"\n## {title}\n\n<{self.web.url().toString()}>\n\n"
+            f"![[attachments/{fname}]]\n")
+        self.owner.statusBar().showMessage("Clipped page into side note", 3000)
 
     def maybe_close(self):
+        if not self.side_note.maybe_discard():
+            return False  # user cancelled — keep the tab
         self.web.setUrl(QUrl("about:blank"))  # stop media/network
         return True
 
 
-class MarkdownEditorWidget(QWidget):
+class MarkdownEditorWidget(_MdFormatMixin, QWidget):
     """A create/edit Markdown note page with a live Obsidian-style preview
     (images + playable video) powered by QtWebEngine. Lives as a tab in the
     main window's center area. start_mode="Preview" gives Obsidian's reading
-    view; double-clicking the preview (or Ctrl+E) switches to editing."""
+    view; double-clicking the preview (or Ctrl+E) switches to editing.
+    Formatting (headings, bold, …) comes from _MdFormatMixin."""
 
     def __init__(self, owner, path=None, start_mode="Split"):
         super().__init__()
@@ -3587,125 +3835,9 @@ class MarkdownEditorWidget(QWidget):
         if mode in ("Split", "Preview"):
             self.refresh_preview()
 
-    # ── Obsidian-style formatting ────────────────────────────────────────────
-    def _format_actions(self):
-        """Key sequence -> action. Headings reuse the app's configured keys."""
-        acts = {}
-        for lvl in range(1, 5):
-            keys = self.owner.shortcuts.get(f"h{lvl}")
-            if keys:
-                acts[keys] = lambda n=lvl: self.toggle_heading(n)
-        acts["Ctrl+B"] = lambda: self.wrap_selection("**")
-        acts["Ctrl+I"] = lambda: self.wrap_selection("*")
-        acts["Ctrl+Shift+Q"] = lambda: self.toggle_line_prefix("> ")
-        acts["Ctrl+Shift+L"] = lambda: self.toggle_line_prefix("- ")
-        acts["Ctrl+E"] = self.toggle_edit_preview
-        return acts
-
-    def eventFilter(self, obj, event):
-        if obj is self._web_proxy and \
-                event.type() == QEvent.Type.MouseButtonDblClick:
-            if self.mode_combo.currentText() == "Preview":
-                # Obsidian-style: reading view -> raw markdown source on edit
-                self.mode_combo.setCurrentText("Editor")
-                self.editor.setFocus()
-                return True
-            return False
-        if obj is self.editor and event.type() in (
-                QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress):
-            if event.key() in (Qt.Key.Key_Control, Qt.Key.Key_Shift,
-                               Qt.Key.Key_Alt, Qt.Key.Key_Meta):
-                return super().eventFilter(obj, event)
-            pressed = QKeySequence(event.keyCombination())
-            for keys, action in self._format_actions().items():
-                if QKeySequence(keys).matches(pressed) == \
-                        QKeySequence.SequenceMatch.ExactMatch:
-                    if event.type() == QEvent.Type.ShortcutOverride:
-                        event.accept()  # claim the key from global shortcuts
-                    else:
-                        action()
-                    return True
-        return super().eventFilter(obj, event)
-
     def toggle_edit_preview(self):
         self.mode_combo.setCurrentText(
             "Preview" if self.mode_combo.currentText() != "Preview" else "Editor")
-
-    def _ensure_editable(self):
-        """Formatting needs the editor visible; a click from Preview should
-        drop you into the raw-markdown editor rather than silently doing
-        nothing (matches Obsidian's reading -> editing switch)."""
-        if self.mode_combo.currentText() == "Preview":
-            self.mode_combo.setCurrentText("Editor")
-
-    def toggle_heading(self, level):
-        """Set (or toggle off) `level` heading on every selected line."""
-        self._ensure_editable()
-        cur = self.editor.textCursor()
-        doc = self.editor.document()
-        start_block = doc.findBlock(cur.selectionStart())
-        end_block = doc.findBlock(cur.selectionEnd())
-        blocks = []
-        b = start_block
-        while True:
-            blocks.append(b)
-            if b == end_block:
-                break
-            b = b.next()
-        prefix = "#" * level + " "
-        all_at_level = all(
-            re.match(r"^#{%d} " % level, bl.text()) for bl in blocks)
-        cur.beginEditBlock()
-        for bl in blocks:
-            c = self.editor.textCursor()
-            c.setPosition(bl.position())
-            c.movePosition(c.MoveOperation.EndOfBlock, c.MoveMode.KeepAnchor)
-            stripped = re.sub(r"^#{1,6} ", "", bl.text())
-            c.insertText(stripped if all_at_level else prefix + stripped)
-        cur.endEditBlock()
-
-    def toggle_line_prefix(self, prefix):
-        self._ensure_editable()
-        cur = self.editor.textCursor()
-        doc = self.editor.document()
-        start_block = doc.findBlock(cur.selectionStart())
-        end_block = doc.findBlock(cur.selectionEnd())
-        blocks = []
-        b = start_block
-        while True:
-            blocks.append(b)
-            if b == end_block:
-                break
-            b = b.next()
-        all_prefixed = all(bl.text().startswith(prefix) for bl in blocks)
-        cur.beginEditBlock()
-        for bl in blocks:
-            c = self.editor.textCursor()
-            c.setPosition(bl.position())
-            c.movePosition(c.MoveOperation.EndOfBlock, c.MoveMode.KeepAnchor)
-            t = bl.text()
-            c.insertText(t[len(prefix):] if all_prefixed and t.startswith(prefix)
-                         else prefix + t)
-        cur.endEditBlock()
-
-    def wrap_selection(self, marker):
-        """Wrap the selection in `marker` (bold/italic), or unwrap if already
-        wrapped. With no selection, insert the markers and park the cursor
-        between them."""
-        self._ensure_editable()
-        cur = self.editor.textCursor()
-        if not cur.hasSelection():
-            cur.insertText(marker + marker)
-            cur.movePosition(cur.MoveOperation.Left,
-                             cur.MoveMode.MoveAnchor, len(marker))
-            self.editor.setTextCursor(cur)
-            return
-        text = cur.selectedText()
-        if text.startswith(marker) and text.endswith(marker) \
-                and len(text) >= 2 * len(marker):
-            cur.insertText(text[len(marker):-len(marker)])
-        else:
-            cur.insertText(f"{marker}{text}{marker}")
 
     def insert_media(self, kind):
         base = (os.path.dirname(os.path.abspath(self.path)) if self.path
