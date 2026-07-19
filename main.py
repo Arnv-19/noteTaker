@@ -3494,8 +3494,8 @@ class MarkdownEditorWidget(QWidget):
 
     def goto_block(self, block_no):
         """Scroll the editor to a heading line (from the Outline panel)."""
-        if not self.editor.isVisible():
-            self.mode_combo.setCurrentText("Split")
+        if self.mode_combo.currentText() == "Preview":
+            self.mode_combo.setCurrentText("Editor")
         block = self.editor.document().findBlockByNumber(block_no)
         if not block.isValid():
             return
@@ -3530,7 +3530,9 @@ class MarkdownEditorWidget(QWidget):
         if obj is self._web_proxy and \
                 event.type() == QEvent.Type.MouseButtonDblClick:
             if self.mode_combo.currentText() == "Preview":
-                self.mode_combo.setCurrentText("Split")
+                # Obsidian-style: reading view -> raw markdown source on edit
+                self.mode_combo.setCurrentText("Editor")
+                self.editor.setFocus()
                 return True
             return False
         if obj is self.editor and event.type() in (
@@ -3555,9 +3557,10 @@ class MarkdownEditorWidget(QWidget):
 
     def _ensure_editable(self):
         """Formatting needs the editor visible; a click from Preview should
-        drop you into editing rather than silently doing nothing."""
-        if not self.editor.isVisible():
-            self.mode_combo.setCurrentText("Split")
+        drop you into the raw-markdown editor rather than silently doing
+        nothing (matches Obsidian's reading -> editing switch)."""
+        if self.mode_combo.currentText() == "Preview":
+            self.mode_combo.setCurrentText("Editor")
 
     def toggle_heading(self, level):
         """Set (or toggle off) `level` heading on every selected line."""
