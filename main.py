@@ -465,7 +465,7 @@ class MainWindow(QMainWindow):
         self.notes_tabs.setDocumentMode(True)
         self.notes_tabs.setMovable(True)
         self.notes_tabs.tabCloseRequested.connect(self.on_note_tab_close)
-        self.notes_tabs.currentChanged.connect(lambda _i: self.refresh_outline())
+        self.notes_tabs.currentChanged.connect(lambda _i: self.refresh_side_panels())
         self.center_stack.addWidget(self.notes_tabs)
         left_layout.addWidget(self.center_stack)
 
@@ -1947,11 +1947,11 @@ class MainWindow(QMainWindow):
             items_by_level[level] = item
             
     def on_outline_clicked(self, item, column):
-        if self.center_stack.currentWidget() is self.notes_tabs:
+        src = getattr(self, "_note_panel_source", None)
+        if src is not None:
             block = item.data(0, Qt.ItemDataRole.UserRole)
-            w = self.notes_tabs.currentWidget()
-            if block is not None and isinstance(w, MarkdownEditorWidget):
-                w.goto_block(block)
+            if block is not None:
+                src.goto_block(block)
             return
         page = item.data(0, Qt.ItemDataRole.UserRole)
         if page is not None:
@@ -2168,6 +2168,12 @@ class MainWindow(QMainWindow):
         menu.exec(self.tree_widget.mapToGlobal(pos))
 
     def on_tree_clicked(self, item, column):
+        src = getattr(self, "_note_panel_source", None)
+        if src is not None:  # note headings mirrored into the Annotations tree
+            block = item.data(0, Qt.ItemDataRole.UserRole)
+            if block is not None:
+                src.goto_block(block)
+            return
         node = self.tree_item_to_node.get(id(item))
         if node and "page" in node:
             page_idx = max(0, node["page"] - 1)
@@ -2800,28 +2806,54 @@ class MainWindow(QMainWindow):
 
     def show_pdf_center(self):
         self.center_stack.setCurrentWidget(self.scroll_area)
-        self.refresh_outline()
+        self.refresh_side_panels()
 
     def show_notes_center(self):
         self.center_stack.setCurrentWidget(self.notes_tabs)
-        self.refresh_outline()
+        self.refresh_side_panels()
 
-    def refresh_outline(self):
-        """Outline tab shows the PDF's TOC, or the active note's headings."""
-        if self.center_stack.currentWidget() is self.notes_tabs:
-            w = self.notes_tabs.currentWidget()
-            if isinstance(w, MarkdownEditorWidget):
-                self.build_note_outline(w)
-            else:
-                self.outline_widget.clear()  # e.g. a browser tab
-        else:
+    def current_note_source(self):
+        """The widget whose .editor holds the active markdown (a note tab or a
+        browser's visible side note), or None when a PDF is active."""
+        if self.center_stack.currentWidget() is not self.notes_tabs:
+            return None
+        w = self.notes_tabs.currentWidget()
+        if isinstance(w, MarkdownEditorWidget):
+            return w
+        if isinstance(w, WebBrowserWidget) and not w.side_note.isHidden():
+            return w.side_note
+        return None
+
+    def refresh_side_panels(self):
+        """Outline + Annotations reflect the active view: a PDF's TOC and
+        annotation tree, or the active note's headings (notes populate the
+        Annotations panel too)."""
+        if self.center_stack.currentWidget() is not self.notes_tabs:
+            # PDF is showing — restore its panels
+            self._note_panel_source = None
             self.load_toc()
+            self.render_tree()
+            self.update_context_label()
+            return
+        src = self.current_note_source()
+        self._note_panel_source = src
+        if src is None:
+            # a browser tab with no visible side note — nothing note-ish to show
+            self.outline_widget.clear()
+            self.tree_widget.clear()
+            self.context_label.setText("Context: —")
+            return
+        text = src.editor.toPlainText()
+        self._fill_heading_tree(self.outline_widget, text, "(no headings yet)")
+        self._fill_heading_tree(self.tree_widget, text, "(note has no headings)")
+        name = os.path.basename(src.path) if getattr(src, "path", None) else "note"
+        self.context_label.setText(f"📝 {name}")
 
-    def build_note_outline(self, widget):
-        self.outline_widget.clear()
+    def _fill_heading_tree(self, tree, text, empty_msg):
+        tree.clear()
         items_by_level = {}
         found = False
-        for i, line in enumerate(widget.editor.toPlainText().split("\n")):
+        for i, line in enumerate(text.split("\n")):
             mm = re.match(r"^(#{1,6})\s+(.*)$", line)
             if not mm:
                 continue
@@ -2831,13 +2863,13 @@ class MainWindow(QMainWindow):
             item.setData(0, Qt.ItemDataRole.UserRole, i)  # editor line/block number
             parent = next((items_by_level[lv] for lv in range(level - 1, 0, -1)
                            if lv in items_by_level), None)
-            (parent.addChild if parent else self.outline_widget.addTopLevelItem)(item)
+            (parent.addChild if parent else tree.addTopLevelItem)(item)
             items_by_level[level] = item
             for lv in [lv for lv in items_by_level if lv > level]:
                 del items_by_level[lv]
         if not found:
-            self.outline_widget.addTopLevelItem(QTreeWidgetItem(["(no headings yet)"]))
-        self.outline_widget.expandAll()
+            tree.addTopLevelItem(QTreeWidgetItem([empty_msg]))
+        tree.expandAll()
 
     def _open_md_editor(self, path=None, mode="Split"):
         """Open a note as a tab in the middle area (like PDFs). If the file
@@ -3344,6 +3376,14 @@ class SideNoteWidget(_MdFormatMixin, QWidget):
         self.owner = owner
         self.path = None
         self._dirty = False
+        self._last_src_url = None  # dedupe source links across captures
+
+        # Debounced refresh of the Outline/Annotations side panels
+        self._panel_timer = QTimer(self)
+        self._panel_timer.setSingleShot(True)
+        self._panel_timer.setInterval(400)
+        self._panel_timer.timeout.connect(
+            lambda: self.owner.refresh_side_panels())
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -3358,6 +3398,18 @@ class SideNoteWidget(_MdFormatMixin, QWidget):
         bar.addAction("💾 Save", self.save)
         bar.addAction("⨯", self.hide).setToolTip("Hide the note pane")
         root.addWidget(bar)
+
+        # Formatting row (also usable by keyboard — Alt+1…4, Ctrl+B/I, …)
+        fmt = QToolBar()
+        ks = owner.shortcuts
+        for lvl in range(1, 5):
+            a = fmt.addAction(f"H{lvl}", lambda _=False, n=lvl: self.toggle_heading(n))
+            a.setToolTip(f"Heading {lvl} ({ks.get(f'h{lvl}', '')})")
+        fmt.addAction("𝐁", lambda: self.wrap_selection("**")).setToolTip("Bold (Ctrl+B)")
+        fmt.addAction("𝘐", lambda: self.wrap_selection("*")).setToolTip("Italic (Ctrl+I)")
+        fmt.addAction("❝", lambda: self.toggle_line_prefix("> ")).setToolTip("Quote")
+        fmt.addAction("•", lambda: self.toggle_line_prefix("- ")).setToolTip("List")
+        root.addWidget(fmt)
 
         self.editor = QPlainTextEdit()
         self.editor.setPlaceholderText(
@@ -3374,6 +3426,7 @@ class SideNoteWidget(_MdFormatMixin, QWidget):
     def _on_changed(self):
         self._dirty = True
         self._refresh_label()
+        self._panel_timer.start()  # keep Outline/Annotations in sync
 
     def _refresh_label(self):
         name = os.path.basename(self.path) if self.path else "(unsaved note)"
@@ -3457,6 +3510,30 @@ class SideNoteWidget(_MdFormatMixin, QWidget):
         self.editor.centerCursor()
         if self.path:
             self.save()  # keep the file on disk current
+
+    def add_web_capture(self, text, url, title):
+        """Append captured web text. The source (page title heading) is added
+        only once per page — not repeated for every capture — so a page you
+        read through stays under a single, clean heading."""
+        text = text.strip()
+        if not text:
+            return
+        header = ""
+        if url != self._last_src_url:
+            header = f"\n## {title}\n<{url}>\n"
+            self._last_src_url = url
+        quoted = "\n".join("> " + ln for ln in text.split("\n") if ln.strip())
+        self.append_block(f"{header}\n{quoted}\n")
+
+    def goto_block(self, block_no):
+        block = self.editor.document().findBlockByNumber(block_no)
+        if not block.isValid():
+            return
+        c = self.editor.textCursor()
+        c.setPosition(block.position())
+        self.editor.setTextCursor(c)
+        self.editor.centerCursor()
+        self.editor.setFocus()
 
 
 class MediaPlayerDialog(QDialog):
@@ -3586,6 +3663,7 @@ class WebBrowserWidget(QWidget):
 
     def toggle_side_note(self):
         self.side_note.setVisible(self.side_note.isHidden())
+        self.owner.refresh_side_panels()
 
     def _arm_key_capture(self, _ok=True):
         fp = self.web.focusProxy()
@@ -3618,14 +3696,13 @@ class WebBrowserWidget(QWidget):
         nothing selected, just show the pane so you can type."""
         if self.side_note.isHidden():
             self.side_note.show()
+            self.owner.refresh_side_panels()
         sel = self.web.page().selectedText().strip()
         if not sel:
             self.side_note.editor.setFocus()
             return
-        src = self.web.title() or self.web.url().toString()
-        quoted = "\n".join("> " + ln for ln in sel.split("\n"))
-        self.side_note.append_block(
-            f"\n{quoted}\n>\n> — [{src}]({self.web.url().toString()})\n")
+        title = self.web.title() or self.web.url().toString()
+        self.side_note.add_web_capture(sel, self.web.url().toString(), title)
         self.owner.statusBar().showMessage("Captured selection to side note", 2000)
 
     def _on_title(self, title):
@@ -3811,10 +3888,10 @@ class MarkdownEditorWidget(_MdFormatMixin, QWidget):
         html = note_md_to_html(self.editor.toPlainText(), self._base_dir(),
                                self.owner.vault_path, self.owner.theme_name)
         self.web.setHtml(html, QUrl.fromLocalFile(self._base_dir() + os.sep))
-        # Keep the Outline panel in sync with this note's headings
+        # Keep the Outline + Annotations panels in sync with this note
         if getattr(self.owner, "notes_tabs", None) is not None \
                 and self.owner.notes_tabs.currentWidget() is self:
-            self.owner.refresh_outline()
+            self.owner.refresh_side_panels()
 
     def goto_block(self, block_no):
         """Scroll the editor to a heading line (from the Outline panel)."""
