@@ -568,6 +568,7 @@ class MainWindow(QMainWindow):
         sc(self.shortcuts.get("next_page"), self.next_page)
         sc(self.shortcuts.get("cheatsheet"), self.show_cheatsheet)
         sc(self.shortcuts.get("screenshot"), self.start_screenshot_mode)
+        sc("Ctrl+W", self.close_center_tab)  # close current note/browser tab
 
     # ── Settings ─────────────────────────────────────────────────────────────
     def load_settings(self):
@@ -2873,18 +2874,28 @@ class MainWindow(QMainWindow):
         if idx >= 0:
             self.notes_tabs.setTabText(idx, f"🌐 {text}")
 
-    def open_web_browser(self):
+    def open_web_browser(self, start_url="https://www.google.com"):
         try:
-            page = WebBrowserWidget(self)
+            page = WebBrowserWidget(self, start_url=start_url)
         except Exception as e:
             QMessageBox.critical(self, "Browser unavailable",
                                  f"Could not open the web browser:\n{e}")
-            return
+            return None
         idx = self.notes_tabs.addTab(page, "🌐 Web")
         self.notes_tabs.setCurrentIndex(idx)
         self.show_notes_center()
         self.vault_toggle_action.setChecked(False)
         page.url_bar.setFocus()
+        return page
+
+    def close_center_tab(self, widget=None):
+        """Close a specific note/browser tab, or the current one (Ctrl+W)."""
+        if self.center_stack.currentWidget() is not self.notes_tabs:
+            return
+        idx = (self.notes_tabs.indexOf(widget) if widget is not None
+               else self.notes_tabs.currentIndex())
+        if idx >= 0:
+            self.on_note_tab_close(idx)
 
     def on_note_tab_close(self, idx):
         w = self.notes_tabs.widget(idx)
@@ -3294,14 +3305,25 @@ class WebBrowserWidget(QWidget):
             "Screenshot this page into a Markdown note")
         bar.addAction("🔗 Open externally", self.open_in_system_browser).setToolTip(
             "Open the current page in your normal browser")
+        bar.addAction("✖ Close", lambda: self.owner.close_center_tab(self)).setToolTip(
+            "Close this browser tab (Ctrl+W)")
         root.addWidget(bar)
 
         self.web = QWebEngineView()
         self.web.urlChanged.connect(
             lambda u: self.url_bar.setText(u.toString()))
         self.web.titleChanged.connect(self._on_title)
+        # Links that open a new window/tab (target=_blank, e.g. YouTube) used
+        # to spawn a bare, uncloseable window — keep them as in-app tabs.
+        self.web.page().newWindowRequested.connect(self._on_new_window)
         root.addWidget(self.web)
-        self.web.setUrl(QUrl(start_url))
+        if start_url:
+            self.web.setUrl(QUrl(start_url))
+
+    def _on_new_window(self, request):
+        new_widget = self.owner.open_web_browser(start_url=None)
+        if new_widget is not None:
+            request.openIn(new_widget.web.page())
 
     def _on_title(self, title):
         self.owner._update_browser_tab(self, (title or "Web")[:22])
