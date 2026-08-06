@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
     QLabel, QScrollArea, QSplitter, QToolBar, QInputDialog,
     QMessageBox, QLineEdit, QMenu, QDialog, QGridLayout, QComboBox,
     QTabWidget, QCheckBox, QKeySequenceEdit, QWidgetAction, QSizePolicy,
-    QAbstractItemView, QTabBar, QTextBrowser, QPlainTextEdit, QStackedWidget
+    QAbstractItemView, QTabBar, QPlainTextEdit, QStackedWidget
 )
 import re
 import shutil
@@ -93,6 +93,7 @@ class MainWindow(QMainWindow):
         self.source_title = "Untitled_PDF"
         self.vault_path = ""
         self.notes_root = ""  # sidebar folder — any folder, vault optional
+        self.workspace = ""   # "" until chosen; "light" (no web) or "study" (web tools)
         self.night_mode = False
         self.save_to_pdf_mode = True
         self.theme_name = "AMOLED"
@@ -127,25 +128,102 @@ class MainWindow(QMainWindow):
         self.setup_ui()
         self.load_settings()
         self.setup_shortcuts()
+        self._init_workspace()
+
+    # ── Workspace flavor (Annotator+Notes "light" vs "study" with web tools) ──
+    def _init_workspace(self):
+        # Default to "study" until the user is prompted, so constructing the
+        # window has no modal side effect (keeps headless tests non-blocking).
+        self._needs_ws_prompt = self.workspace not in ("light", "study")
+        if self._needs_ws_prompt:
+            self.workspace = "study"
+        self._apply_workspace()
+
+    def maybe_prompt_workspace(self):
+        """Shown once from the real entry point (after the window is visible),
+        never during construction — so tests don't hit a modal."""
+        if getattr(self, "_needs_ws_prompt", False):
+            self._needs_ws_prompt = False
+            self.workspace = self._first_run_workspace_picker()
+            self.save_settings()
+            self._apply_workspace()
+
+    def _first_run_workspace_picker(self):
+        box = QMessageBox(self)
+        box.setWindowTitle("Choose your workspace")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText("How do you want to use the app?")
+        box.setInformativeText(
+            "📚  Annotator + Notes — PDFs, notes and media (lightweight)\n\n"
+            "🌐  Study — everything above, plus the in-app web browser and "
+            "YouTube player\n\nYou can switch anytime from ☰ File ▸ Workspace.")
+        light_btn = box.addButton("📚 Annotator + Notes", QMessageBox.ButtonRole.AcceptRole)
+        study_btn = box.addButton("🌐 Study", QMessageBox.ButtonRole.AcceptRole)
+        box.exec()
+        return "study" if box.clickedButton() is study_btn else "light"
+
+    def set_workspace(self, flavor):
+        if flavor not in ("light", "study") or flavor == self.workspace:
+            self._apply_workspace()  # keep menu checkmarks in sync
+            return
+        self.workspace = flavor
+        self.save_settings()
+        self._apply_workspace()
+
+    def _apply_workspace(self):
+        study = self.workspace == "study"
+        # Show/hide web entry points
+        for a in getattr(self, "_web_menu_actions", []):
+            a.setVisible(study)
+        self.web_action.setVisible(study)
+        self.youtube_action.setVisible(study)
+        # Reflect current choice in the Workspace submenu
+        self.ws_light_action.setChecked(not study)
+        self.ws_study_action.setChecked(study)
+        # Leaving Study: close any open web/YouTube tabs (offering to save notes)
+        if not study:
+            for i in range(self.notes_tabs.count() - 1, -1, -1):
+                w = self.notes_tabs.widget(i)
+                if isinstance(w, (WebBrowserWidget, YouTubePlayerWidget)):
+                    if hasattr(w, "maybe_close"):
+                        w.maybe_close()  # save-prompt side effect; force-close anyway
+                    self.notes_tabs.removeTab(i)
+                    w.deleteLater()
+            if self.notes_tabs.count() == 0:
+                self.show_pdf_center()
 
     def setup_ui(self):
         toolbar = QToolBar("Main Toolbar")
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
-        # ── File menu (Open / Recent / Load MD / Vault / Save / Export) ──
+        # ── File menu (Open / Recent / Notes / Vault / Save / Export) ──
         file_btn = QPushButton("☰ File")
         file_btn.setFlat(True)
         file_menu = QMenu(self)
         file_menu.addAction("📂 Open PDF…", self.open_pdf)
         self.recent_menu_action = file_menu.addAction("📋 Recent Files", self.show_recent_files)
-        file_menu.addAction("📄 Load Markdown Session…", self.load_markdown)
-        file_menu.addAction("📖 Open Markdown File…", self.open_markdown_view)
-        file_menu.addAction("📝 New Markdown Note…", self.new_markdown_note)
-        file_menu.addAction("✏ Edit Markdown Note…", self.edit_markdown_note)
-        file_menu.addAction("🌐 Web Browser", self.open_web_browser)
+        file_menu.addSeparator()
+        # ── Notes (one editor, one open-door) ──
+        file_menu.addAction("📝 New Note…", self.new_markdown_note)
+        file_menu.addAction("📖 Open Note…", self.edit_markdown_note)
+        # Web tools — gated by the Study workspace (see _apply_workspace)
+        self._web_menu_actions = [
+            file_menu.addAction("🌐 Study Browser", self.open_web_browser),
+            file_menu.addAction("🎬 YouTube Player", self.open_youtube_player),
+        ]
         file_menu.addSeparator()
         file_menu.addAction("⚙ Set Vault Folder…", self.set_vault)
+        # PDF-annotation import (rebuilds the annotation tree from an exported .md)
+        file_menu.addAction("📄 Import PDF Annotations from .md…", self.load_markdown)
+        # Workspace switcher
+        ws_menu = file_menu.addMenu("🧭 Workspace")
+        self.ws_light_action = ws_menu.addAction(
+            "📚 Annotator + Notes", lambda: self.set_workspace("light"))
+        self.ws_study_action = ws_menu.addAction(
+            "🌐 Study (adds web tools)", lambda: self.set_workspace("study"))
+        for a in (self.ws_light_action, self.ws_study_action):
+            a.setCheckable(True)
         file_menu.addSeparator()
         file_menu.addAction("💾 Save Annotations", self.export_markdown)
         file_menu.addAction("🖨 Export Notes as PDF…", self.export_pdf)
@@ -162,10 +240,16 @@ class MainWindow(QMainWindow):
         self.vault_toggle_action.toggled.connect(self.toggle_vault_panel)
         toolbar.addAction(self.vault_toggle_action)
 
-        web_action = QAction("🌐", self)
-        web_action.setToolTip("Open a web browser tab (search, clip screenshots to notes)")
-        web_action.triggered.connect(self.open_web_browser)
-        toolbar.addAction(web_action)
+        # Web-tool toolbar buttons (gated by the Study workspace)
+        self.web_action = QAction("🌐", self)
+        self.web_action.setToolTip("Open a study browser tab (read web pages, take notes)")
+        self.web_action.triggered.connect(self.open_web_browser)
+        toolbar.addAction(self.web_action)
+
+        self.youtube_action = QAction("🎬", self)
+        self.youtube_action.setToolTip("Open a YouTube player (video/playlist + timestamped notes)")
+        self.youtube_action.triggered.connect(self.open_youtube_player)
+        toolbar.addAction(self.youtube_action)
 
         toolbar.addSeparator()
 
@@ -579,6 +663,7 @@ class MainWindow(QMainWindow):
                     data = json.load(f)
                 self.vault_path = data.get("vault_path", "")
                 self.notes_root = data.get("notes_root", "")
+                self.workspace = data.get("workspace", "")
                 self.recent_files = data.get("recent_files", [])
                 self.bookmarks = data.get("bookmarks", {})
                 self.theme_name = data.get("theme", "AMOLED")
@@ -636,6 +721,7 @@ class MainWindow(QMainWindow):
             "shortcuts": self.shortcuts,
             "vault_sidebar": self.vault_panel.isVisible() if hasattr(self, "vault_panel") else False,
             "notes_root": self.notes_root,
+            "workspace": self.workspace,
         }
         with open(self.SETTINGS_FILE, "w") as f:
             json.dump(data, f, indent=2)
@@ -2730,79 +2816,8 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.statusBar().showMessage(f"Error loading: {e}", 5000)
 
-    def _md_for_display(self, raw):
-        """Convert app/Obsidian-flavored markdown into Qt-renderable markdown:
-        drop YAML frontmatter, turn ![[embeds]] into standard images, and
-        flatten `> [!type] title` callout headers into a bold quote line."""
-        text = raw
-
-        # Strip a leading YAML frontmatter block (--- ... ---)
-        if text.lstrip().startswith("---"):
-            lines = text.split("\n")
-            start = next(i for i, l in enumerate(lines) if l.strip() == "---")
-            end = None
-            for i in range(start + 1, len(lines)):
-                if lines[i].strip() == "---":
-                    end = i
-                    break
-            if end is not None:
-                text = "\n".join(lines[end + 1:]).lstrip("\n")
-
-        # Obsidian embeds: ![[path|size]] -> ![](path)
-        def _embed(m):
-            inner = m.group(1).split("|")[0].strip()
-            return f"![]({inner})"
-        text = re.sub(r"!\[\[([^\]]+)\]\]", _embed, text)
-
-        # Callout headers: `> [!quote] p.5` -> `> **p.5**`
-        out = []
-        for line in text.split("\n"):
-            m = re.match(r"^(\s*>+\s*)\[!(\w+)\]\s*(.*)$", line)
-            if m:
-                prefix, ctype, title = m.group(1), m.group(2), m.group(3).strip()
-                out.append(f"{prefix}**{title or ctype.capitalize()}**")
-            else:
-                out.append(line)
-        return "\n".join(out)
-
-    def open_markdown_view(self):
-        start_dir = self.vault_path or os.path.expanduser("~")
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Open Markdown File", start_dir,
-            "Markdown Files (*.md *.markdown);;All Files (*)")
-        if not path:
-            return
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                raw = f.read()
-        except Exception as e:
-            self.statusBar().showMessage(f"Error opening: {e}", 5000)
-            return
-
-        base_dir = os.path.dirname(os.path.abspath(path))
-        dlg = QDialog(self)
-        dlg.setWindowTitle(f"📖 {os.path.basename(path)}")
-        dlg.resize(820, 900)
-        layout = QVBoxLayout(dlg)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        browser = QTextBrowser(dlg)
-        browser.setOpenExternalLinks(True)
-        # Resolve relative image paths (e.g. attachments/x.png) against the file
-        browser.setSearchPaths([base_dir, os.path.join(base_dir, "attachments")])
-        browser.setMarkdown(self._md_for_display(raw))
-        layout.addWidget(browser)
-
-        bar = QHBoxLayout()
-        bar.setContentsMargins(8, 6, 8, 8)
-        bar.addStretch()
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(dlg.accept)
-        bar.addWidget(close_btn)
-        layout.addLayout(bar)
-
-        self.statusBar().showMessage(f"Viewing {os.path.basename(path)}", 3000)
-        dlg.exec()
+    # (Read-only Markdown popup retired — the note editor's Preview mode is the
+    #  reading view. Open notes via the sidebar or ☰ File ▸ Open Note.)
 
     def show_pdf_center(self):
         self.center_stack.setCurrentWidget(self.scroll_area)
@@ -2820,7 +2835,8 @@ class MainWindow(QMainWindow):
         w = self.notes_tabs.currentWidget()
         if isinstance(w, MarkdownEditorWidget):
             return w
-        if isinstance(w, WebBrowserWidget) and not w.side_note.isHidden():
+        if isinstance(w, (WebBrowserWidget, YouTubePlayerWidget)) \
+                and not w.side_note.isHidden():
             return w.side_note
         return None
 
@@ -2896,6 +2912,22 @@ class MainWindow(QMainWindow):
         # Collapse the sidebar so the note gets the full width; 🗂 re-opens it
         self.vault_toggle_action.setChecked(False)
 
+    def _reload_note_tab_if_open(self, path, exclude=None):
+        """If `path` is open as a MarkdownEditorWidget tab, reload it from disk
+        (unless it has unsaved edits) so a side-note save doesn't get clobbered."""
+        ap = os.path.abspath(path)
+        for i in range(self.notes_tabs.count()):
+            w = self.notes_tabs.widget(i)
+            if w is exclude or not isinstance(w, MarkdownEditorWidget):
+                continue
+            if w.path and os.path.abspath(w.path) == ap and not w._dirty:
+                try:
+                    with open(w.path, "r", encoding="utf-8") as fh:
+                        w.editor.setPlainText(fh.read())
+                    w._dirty = False
+                except OSError:
+                    pass
+
     def _update_note_tab(self, widget, text):
         idx = self.notes_tabs.indexOf(widget)
         if idx >= 0:
@@ -2914,6 +2946,25 @@ class MainWindow(QMainWindow):
                                  f"Could not open the web browser:\n{e}")
             return None
         idx = self.notes_tabs.addTab(page, "🌐 Web")
+        self.notes_tabs.setCurrentIndex(idx)
+        self.show_notes_center()
+        self.vault_toggle_action.setChecked(False)
+        page.url_bar.setFocus()
+        return page
+
+    def _update_youtube_tab(self, widget, text):
+        idx = self.notes_tabs.indexOf(widget)
+        if idx >= 0:
+            self.notes_tabs.setTabText(idx, f"🎬 {text}")
+
+    def open_youtube_player(self, start_url=""):
+        try:
+            page = YouTubePlayerWidget(self, start_url=start_url)
+        except Exception as e:
+            QMessageBox.critical(self, "YouTube unavailable",
+                                 f"Could not open the YouTube player:\n{e}")
+            return None
+        idx = self.notes_tabs.addTab(page, "🎬 YouTube")
         self.notes_tabs.setCurrentIndex(idx)
         self.show_notes_center()
         self.vault_toggle_action.setChecked(False)
@@ -3499,6 +3550,8 @@ class SideNoteWidget(_MdFormatMixin, QWidget):
             self.owner.statusBar().showMessage(
                 f"Saved {os.path.basename(self.path)}", 3000)
             self.owner.refresh_vault_tree()
+            # Keep an open note tab of the same file in sync (avoid clobber)
+            self.owner._reload_note_tab_if_open(self.path, exclude=self)
         except Exception as e:
             QMessageBox.warning(self, "Save failed", str(e))
 
@@ -3601,6 +3654,189 @@ class MediaPlayerDialog(QDialog):
         e.accept()
 
 
+def parse_youtube(url):
+    """Extract (video_id, playlist_id) from any YouTube URL form. Either may be
+    None. Handles watch?v=, youtu.be/, /embed/, /shorts/, and list= playlists."""
+    url = url.strip()
+    vid = None
+    m = re.search(r"(?:v=|/embed/|/shorts/|youtu\.be/)([A-Za-z0-9_-]{11})", url)
+    if m:
+        vid = m.group(1)
+    elif re.fullmatch(r"[A-Za-z0-9_-]{11}", url):
+        vid = url  # a bare id
+    plist = None
+    m = re.search(r"[?&]list=([A-Za-z0-9_-]+)", url)
+    if m:
+        plist = m.group(1)
+    return vid, plist
+
+
+def youtube_embed_url(vid, plist):
+    """Build the minimal /embed URL (player only, no youtube.com chrome)."""
+    base = "https://www.youtube.com/embed/"
+    params = "enablejsapi=1&rel=0"
+    if vid:
+        src = f"{base}{vid}?{params}"
+        if plist:
+            src += f"&list={plist}"
+        return src
+    if plist:
+        return f"{base}videoseries?{params}&list={plist}"
+    return None
+
+
+class YouTubePlayerWidget(QWidget):
+    """A focused YouTube tab: paste a video or playlist link and only the
+    embedded player renders (no youtube.com browsing). Reuses SideNoteWidget
+    for notes and can drop the current playback time into the note as a
+    clickable, seekable timestamp."""
+
+    path = None  # so notes-tab plumbing treats it like the other tabs
+
+    def __init__(self, owner, start_url=""):
+        super().__init__()
+        self.owner = owner
+        self._vid = None
+        self._plist = None
+        from PyQt6.QtWebEngineWidgets import QWebEngineView
+        from PyQt6.QtWebEngineCore import QWebEngineSettings
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        bar = QToolBar()
+        self.url_bar = QLineEdit()
+        self.url_bar.setPlaceholderText(
+            "Paste a YouTube video or playlist link, then Enter…")
+        self.url_bar.returnPressed.connect(self.load_from_bar)
+        bar.addWidget(self.url_bar)
+        bar.addAction("▶ Load", self.load_from_bar).setToolTip("Load the link")
+        bar.addAction("⏱ Grab time → note", self.grab_timestamp).setToolTip(
+            "Insert the current play position into the note as a clickable, "
+            "seekable timestamp")
+        bar.addAction("📝 Note pane", self.toggle_side_note).setToolTip(
+            "Show/hide the note next to the video")
+        bar.addAction("🔗 Open externally", self.open_externally).setToolTip(
+            "Open on youtube.com in your normal browser")
+        bar.addAction("✖ Close", lambda: self.owner.close_center_tab(self)).setToolTip(
+            "Close this tab (Ctrl+W)")
+        root.addWidget(bar)
+
+        self.web = QWebEngineView()
+        ws = self.web.settings()
+        ws.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
+        ws.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
+        ws.setAttribute(QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, False)
+
+        self.split = QSplitter(Qt.Orientation.Horizontal)
+        self.split.addWidget(self.web)
+        self.side_note = SideNoteWidget(owner)
+        self.split.addWidget(self.side_note)
+        self.split.setSizes([680, 340])
+        self.side_note.hide()
+        root.addWidget(self.split, 1)
+
+        self._show_placeholder()
+        if start_url:
+            self.url_bar.setText(start_url)
+            self.load_from_bar()
+
+    def _show_placeholder(self):
+        t = THEMES.get(self.owner.theme_name, THEMES["AMOLED"])
+        bg = "rgb(%d,%d,%d)" % t["window"]
+        fg = "rgb(%d,%d,%d)" % t["text"]
+        self.web.setHtml(
+            f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+            html,body {{ margin:0; height:100%; background:{bg}; color:{fg};
+              display:flex; align-items:center; justify-content:center;
+              font-family:-apple-system,'Segoe UI',sans-serif; opacity:.7; }}
+            </style></head><body>🎬 Paste a YouTube video or playlist link above
+            </body></html>""")
+
+    def load_from_bar(self):
+        self._vid, self._plist = parse_youtube(self.url_bar.text())
+        src = youtube_embed_url(self._vid, self._plist)
+        if not src:
+            self.owner.statusBar().showMessage(
+                "That doesn't look like a YouTube video or playlist link.", 4000)
+            return
+        # Minimal page: just the IFrame Player API player, no youtube.com chrome
+        html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+          html,body{{margin:0;height:100%;background:#000;overflow:hidden}}
+          iframe{{border:0;width:100%;height:100%}}</style></head><body>
+          <div id="p"></div>
+          <script src="https://www.youtube.com/iframe_api"></script>
+          <script>
+            var player;
+            function onYouTubeIframeAPIReady() {{
+              player = new YT.Player('p', {{ width:'100%', height:'100%',
+                videoId: {('"'+self._vid+'"') if self._vid else 'undefined'},
+                playerVars: {{ rel:0, {('list:"'+self._plist+'",') if self._plist else ''}
+                  listType: {('"playlist"') if self._plist and not self._vid else 'undefined'} }} }});
+            }}
+            function currentTime() {{ return player && player.getCurrentTime ? Math.floor(player.getCurrentTime()) : -1; }}
+          </script></body></html>"""
+        self.web.setHtml(html, QUrl("https://www.youtube.com"))
+        title = "Playlist" if (self._plist and not self._vid) else "YouTube"
+        self.owner._update_youtube_tab(self, title)
+
+    def _watch_url(self, seconds=None):
+        if self._vid:
+            u = f"https://www.youtube.com/watch?v={self._vid}"
+            if self._plist:
+                u += f"&list={self._plist}"
+        elif self._plist:
+            u = f"https://www.youtube.com/playlist?list={self._plist}"
+        else:
+            return None
+        if seconds and seconds > 0 and self._vid:
+            u += f"&t={seconds}s"
+        return u
+
+    def grab_timestamp(self):
+        if not self._vid and not self._plist:
+            self.owner.statusBar().showMessage("Load a video first.", 3000)
+            return
+
+        def _cb(sec):
+            try:
+                sec = int(sec)
+            except (TypeError, ValueError):
+                sec = -1
+            if sec < 0:
+                self.owner.statusBar().showMessage(
+                    "Couldn't read the play position yet — try again once it's playing.", 4000)
+                return
+            mm, ss = divmod(sec, 60)
+            hh, mm = divmod(mm, 60)
+            stamp = f"{hh}:{mm:02d}:{ss:02d}" if hh else f"{mm}:{ss:02d}"
+            link = self._watch_url(sec)
+            if self.side_note.isHidden():
+                self.side_note.show()
+                self.owner.refresh_side_panels()
+            self.side_note.append_block(f"- [{stamp}]({link}) \n")
+            self.owner.statusBar().showMessage(f"Added timestamp {stamp} to note", 2000)
+
+        self.web.page().runJavaScript("currentTime()", _cb)
+
+    def toggle_side_note(self):
+        self.side_note.setVisible(self.side_note.isHidden())
+        self.owner.refresh_side_panels()
+
+    def open_externally(self):
+        from PyQt6.QtGui import QDesktopServices
+        u = self._watch_url()
+        if u:
+            QDesktopServices.openUrl(QUrl(u))
+
+    def maybe_close(self):
+        if not self.side_note.maybe_discard():
+            return False
+        self.web.setHtml("")  # stop playback
+        return True
+
+
 class WebBrowserWidget(QWidget):
     """A lightweight in-app browser tab (reuses the WebEngine we already ship).
     Type a URL or a search; 📸 screenshots the page into a Markdown note.
@@ -3613,6 +3849,8 @@ class WebBrowserWidget(QWidget):
         self.owner = owner
         self._web_proxy = None
         from PyQt6.QtWebEngineWidgets import QWebEngineView
+        from PyQt6.QtWebEngineCore import QWebEngineSettings
+        self._QWebEngineSettings = QWebEngineSettings
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -3640,6 +3878,10 @@ class WebBrowserWidget(QWidget):
         root.addWidget(bar)
 
         self.web = QWebEngineView()
+        ws = self.web.settings()
+        ws.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
+        ws.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
+        ws.setAttribute(QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, False)
         self.web.urlChanged.connect(
             lambda u: self.url_bar.setText(u.toString()))
         self.web.titleChanged.connect(self._on_title)
@@ -4009,4 +4251,5 @@ if __name__ == "__main__":
     apply_theme(app, "AMOLED")
     window = MainWindow()
     window.show()
+    window.maybe_prompt_workspace()  # first-run workspace picker (real launch only)
     sys.exit(app.exec())
