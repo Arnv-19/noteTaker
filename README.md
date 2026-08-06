@@ -51,13 +51,19 @@ We provide a convenient script that automatically creates a Python virtual envir
 
 *(If you are not on Windows, you can manually create a virtual environment, activate it, and run `pip install -r requirements.txt`, then run `python main.py`)*.
 
+## The Interface
+
+- A **menu bar** (File / Edit / View / Tools / Help) is always at the top — it's the home for every action and can never be hidden away.
+- The **toolbar** is **context-aware**: PDF tools (page nav, zoom, highlight color, pen, eraser, save-to-PDF…) appear only when a PDF is in front of you and step aside when you switch to a note, browser, or YouTube tab — so the top bar always matches what you're doing. (Hide the toolbar entirely with **View ▸ Show Toolbar**; it can't be hidden by an accidental right-click anymore.)
+- **View** has the sidebar / continuous-scroll / night-mode toggles; **Tools** holds Screenshot, Clear Annotations, the **Pomodoro** timer (its countdown shows in the status bar), Set Vault Folder, Workspace, and Preferences; **Help** has the keyboard cheatsheet.
+
 ## How to Use
 
-1. Click **📂 Open** to open a PDF file, or use the **Recent** button to pick up where you left off.
-2. Click **⚙ Vault** to set your Obsidian vault directory (this is where annotations and screenshots are saved).
+1. **File ▸ 📂 Open PDF** (or **Recent Files**) to open a document.
+2. **Tools ▸ ⚙ Set Vault Folder** to choose your Obsidian vault (where annotations and screenshots are saved).
 3. Select text in the PDF by clicking and dragging.
 4. Use **Keyboard Shortcuts** (e.g. `Alt+1`, `Ctrl+Shift+V`) to create an annotation from the selected text.
-5. Hit **F1** in the app to view the Cheatsheet of available keyboard shortcuts.
+5. **Help ▸ Keyboard Shortcuts** (or `F1`) shows the full, editable cheatsheet.
 
 ### Working with Markdown Notes (Obsidian-style)
 
