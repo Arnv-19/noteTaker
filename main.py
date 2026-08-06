@@ -350,9 +350,21 @@ class MainWindow(QMainWindow):
         self._pomo_timer = QTimer(self)
         self._pomo_timer.setInterval(1000)
         self._pomo_timer.timeout.connect(self._pomo_tick)
-        # Persistent status-bar label for the timer
+        # Compact, always-visible timer in the status bar (bottom-right):
+        # ⏱ label + a start/pause button. Full options in Tools ▸ Pomodoro.
         self.pomo_label = QLabel("")
+        self.pomo_label.setToolTip("Pomodoro / stopwatch — right-click for options "
+                                   "(also in Tools ▸ Pomodoro)")
+        self.pomo_label.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.pomo_label.customContextMenuRequested.connect(self._pomo_context_menu)
+        self.pomo_btn = QPushButton("▶")
+        self.pomo_btn.setFlat(True)
+        self.pomo_btn.setFixedWidth(24)
+        self.pomo_btn.setToolTip("Start / pause the timer")
+        self.pomo_btn.clicked.connect(self.pomo_toggle)
         self.statusBar().addPermanentWidget(self.pomo_label)
+        self.statusBar().addPermanentWidget(self.pomo_btn)
+        self._pomo_refresh_label()  # show idle time so the timer is discoverable
 
         # Spacer pushes the theme picker to the right edge
         spacer = QWidget()
@@ -668,6 +680,8 @@ class MainWindow(QMainWindow):
     def _pomo_set_running_ui(self, running):
         if hasattr(self, "pomo_action"):
             self.pomo_action.setText("⏸ Pause" if running else "▶ Start / Pause")
+        if hasattr(self, "pomo_btn"):
+            self.pomo_btn.setText("⏸" if running else "▶")
 
     def setup_shortcuts(self):
         if hasattr(self, 'active_shortcuts'):
@@ -3073,6 +3087,16 @@ class MainWindow(QMainWindow):
             return "🖼"
         return None
 
+    @staticmethod
+    def _doc_icon(name):
+        """Openable documents (this app annotates them): PDF and PowerPoint."""
+        ext = os.path.splitext(name)[1].lower()
+        if ext == ".pdf":
+            return "📕"
+        if ext in (".pptx", ".ppt", ".ppsx", ".pps"):
+            return "📊"
+        return None
+
     def refresh_vault_tree(self):
         if not hasattr(self, "vault_tree"):
             return
@@ -3111,6 +3135,8 @@ class MainWindow(QMainWindow):
                     continue
                 if self._is_note(e):
                     node = QTreeWidgetItem([f"📄 {os.path.splitext(e)[0]}"])
+                elif self._doc_icon(e):
+                    node = QTreeWidgetItem([f"{self._doc_icon(e)} {e}"])
                 elif self._media_icon(e):
                     node = QTreeWidgetItem([f"{self._media_icon(e)} {e}"])
                 else:
@@ -3122,7 +3148,7 @@ class MainWindow(QMainWindow):
         self.vault_tree.expandToDepth(0)
         if self.vault_tree.topLevelItemCount() == 0:
             self.vault_tree.addTopLevelItem(
-                QTreeWidgetItem(["(no notes or media here yet)"]))
+                QTreeWidgetItem(["(no notes, documents or media here yet)"]))
 
     def on_vault_item_clicked(self, item, _col=0):
         path = item.data(0, Qt.ItemDataRole.UserRole)
@@ -3132,6 +3158,9 @@ class MainWindow(QMainWindow):
             # Obsidian-style: single click opens read view; double-click the
             # preview (or Ctrl+E) to switch into editing.
             self._open_md_editor(path, mode="Preview")
+        elif self._doc_icon(os.path.basename(path)):
+            # PDF / PowerPoint — open it in the annotator
+            self.open_pdf_path(path)
         else:
             self._open_media_player(path)
 
