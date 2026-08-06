@@ -30,7 +30,7 @@ import shutil
 from PyQt6.QtCore import Qt, QRect, QPoint, QSize, QTimer, QUrl, QEvent
 from PyQt6.QtGui import (QPixmap, QImage, QAction, QKeySequence, QShortcut,
                          QColor, QPainter, QPen, QTextDocument, QPdfWriter, QIcon,
-                         QFont)
+                         QFont, QCursor)
 
 from theme import (THEMES, apply_theme, HIGHLIGHT_COLORS, PEN_COLORS,
                    hl_qcolor, pen_qcolor)
@@ -73,7 +73,8 @@ class MainWindow(QMainWindow):
         "prev_page": "Left",
         "next_page": "Right",
         "cheatsheet": "F1",
-        "screenshot": "Ctrl+Shift+S"
+        "screenshot": "Ctrl+Shift+S",
+        "eraser": "Ctrl+Shift+E",
     }
 
     def __init__(self):
@@ -129,6 +130,7 @@ class MainWindow(QMainWindow):
         self.load_settings()
         self.setup_shortcuts()
         self._init_workspace()
+        self._sync_toolbar_context()  # PDF tools visible for the default PDF view
 
     # ── Workspace flavor (Annotator+Notes "light" vs "study" with web tools) ──
     def _init_workspace(self):
@@ -195,47 +197,18 @@ class MainWindow(QMainWindow):
     def setup_ui(self):
         toolbar = QToolBar("Main Toolbar")
         toolbar.setMovable(False)
+        # Can't be hidden by an accidental right-click — use View ▸ Show Toolbar
+        toolbar.setContextMenuPolicy(Qt.ContextMenuPolicy.PreventContextMenu)
         self.addToolBar(toolbar)
+        self.toolbar = toolbar
+        # App menus live in the menu bar (self._build_menu_bar, end of setup_ui).
+        # The toolbar carries only tools; PDF-only ones are collected here and
+        # shown only when the PDF canvas is active (_sync_toolbar_context).
+        self._pdf_tool_actions = []
 
-        # ── File menu (Open / Recent / Notes / Vault / Save / Export) ──
-        file_btn = QPushButton("☰ File")
-        file_btn.setFlat(True)
-        file_menu = QMenu(self)
-        file_menu.addAction("📂 Open PDF…", self.open_pdf)
-        self.recent_menu_action = file_menu.addAction("📋 Recent Files", self.show_recent_files)
-        file_menu.addSeparator()
-        # ── Notes (one editor, one open-door) ──
-        file_menu.addAction("📝 New Note…", self.new_markdown_note)
-        file_menu.addAction("📖 Open Note…", self.edit_markdown_note)
-        # Web tools — gated by the Study workspace (see _apply_workspace)
-        self._web_menu_actions = [
-            file_menu.addAction("🌐 Study Browser", self.open_web_browser),
-            file_menu.addAction("🎬 YouTube Player", self.open_youtube_player),
-        ]
-        file_menu.addSeparator()
-        file_menu.addAction("⚙ Set Vault Folder…", self.set_vault)
-        # PDF-annotation import (rebuilds the annotation tree from an exported .md)
-        file_menu.addAction("📄 Import PDF Annotations from .md…", self.load_markdown)
-        # Workspace switcher
-        ws_menu = file_menu.addMenu("🧭 Workspace")
-        self.ws_light_action = ws_menu.addAction(
-            "📚 Annotator + Notes", lambda: self.set_workspace("light"))
-        self.ws_study_action = ws_menu.addAction(
-            "🌐 Study (adds web tools)", lambda: self.set_workspace("study"))
-        for a in (self.ws_light_action, self.ws_study_action):
-            a.setCheckable(True)
-        file_menu.addSeparator()
-        file_menu.addAction("💾 Save Annotations", self.export_markdown)
-        file_menu.addAction("🖨 Export Notes as PDF…", self.export_pdf)
-        file_menu.addAction("🃏 Export Anki Flashcards…", self.export_anki)
-        file_btn.setMenu(file_menu)
-        toolbar.addWidget(file_btn)
-        # Keep attribute so show_recent_files can anchor its popup
-        self.recent_btn = file_btn
-
-        # Vault notes sidebar toggle
+        # Notes sidebar toggle (always visible; mirrored in the View menu)
         self.vault_toggle_action = QAction("🗂", self)
-        self.vault_toggle_action.setToolTip("Toggle vault notes sidebar")
+        self.vault_toggle_action.setToolTip("Show/hide the notes sidebar")
         self.vault_toggle_action.setCheckable(True)
         self.vault_toggle_action.toggled.connect(self.toggle_vault_panel)
         toolbar.addAction(self.vault_toggle_action)
@@ -251,47 +224,50 @@ class MainWindow(QMainWindow):
         self.youtube_action.triggered.connect(self.open_youtube_player)
         toolbar.addAction(self.youtube_action)
 
-        toolbar.addSeparator()
+        # Everything below (until the spacer) is PDF-only — collected into
+        # self._pdf_tool_actions and shown only on the PDF canvas.
+        pdf = self._pdf_tool_actions.append
+        pdf(toolbar.addSeparator())
 
         # ── Page navigation ──
         prev_action = QAction("‹", self)
         prev_action.setToolTip("Previous page")
         prev_action.triggered.connect(self.prev_page)
-        toolbar.addAction(prev_action)
+        toolbar.addAction(prev_action); pdf(prev_action)
 
         self.page_input = QLineEdit("0")
         self.page_input.setFixedWidth(44)
         self.page_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.page_input.returnPressed.connect(self.go_to_page)
-        toolbar.addWidget(self.page_input)
+        pdf(toolbar.addWidget(self.page_input))
 
         self.page_label = QLabel(" / 0 ")
-        toolbar.addWidget(self.page_label)
+        pdf(toolbar.addWidget(self.page_label))
 
         next_action = QAction("›", self)
         next_action.setToolTip("Next page")
         next_action.triggered.connect(self.next_page)
-        toolbar.addAction(next_action)
+        toolbar.addAction(next_action); pdf(next_action)
 
         bookmark_action = QAction("🔖", self)
         bookmark_action.setToolTip("Jump to bookmark (last read page)")
         bookmark_action.triggered.connect(self.goto_bookmark)
-        toolbar.addAction(bookmark_action)
+        toolbar.addAction(bookmark_action); pdf(bookmark_action)
 
-        toolbar.addSeparator()
+        pdf(toolbar.addSeparator())
 
         # ── Zoom ──
         zoom_out_action = QAction("−", self)
         zoom_out_action.setToolTip("Zoom out")
         zoom_out_action.triggered.connect(self.zoom_out)
-        toolbar.addAction(zoom_out_action)
+        toolbar.addAction(zoom_out_action); pdf(zoom_out_action)
 
         zoom_in_action = QAction("＋", self)
         zoom_in_action.setToolTip("Zoom in")
         zoom_in_action.triggered.connect(self.zoom_in)
-        toolbar.addAction(zoom_in_action)
+        toolbar.addAction(zoom_in_action); pdf(zoom_in_action)
 
-        toolbar.addSeparator()
+        pdf(toolbar.addSeparator())
 
         # ── Highlight color picker ──
         self.highlight_color_name = "Yellow"
@@ -304,7 +280,7 @@ class MainWindow(QMainWindow):
             act = color_menu.addAction(self._color_icon(cname), cname)
             act.triggered.connect(lambda checked, c=cname: self.set_highlight_color(c))
         self.color_btn.setMenu(color_menu)
-        toolbar.addWidget(self.color_btn)
+        pdf(toolbar.addWidget(self.color_btn))
         self._refresh_color_btn()
 
         # ── Markup style selector ──
@@ -313,14 +289,14 @@ class MainWindow(QMainWindow):
         self.style_combo.setFixedWidth(100)
         self.style_combo.setToolTip("Markup style for new annotations")
         self.style_combo.currentTextChanged.connect(self.set_markup_style)
-        toolbar.addWidget(self.style_combo)
+        pdf(toolbar.addWidget(self.style_combo))
 
         # ── Pen / draw tool ──
         self.pen_action = QAction("✏", self)
         self.pen_action.setCheckable(True)
         self.pen_action.setToolTip("Freehand pen — draw on the page (saved as PDF ink)")
         self.pen_action.triggered.connect(self.toggle_draw_mode)
-        toolbar.addAction(self.pen_action)
+        toolbar.addAction(self.pen_action); pdf(self.pen_action)
 
         self.pen_opts_btn = QPushButton("▾")
         self.pen_opts_btn.setFlat(True)
@@ -338,15 +314,14 @@ class MainWindow(QMainWindow):
         pen_menu.addSeparator()
         pen_menu.addAction("🧽 Erase Last Stroke", self.erase_last_ink)
         self.pen_opts_btn.setMenu(pen_menu)
-        toolbar.addWidget(self.pen_opts_btn)
+        pdf(toolbar.addWidget(self.pen_opts_btn))
 
         # ── Eraser tool ──
         self.eraser_action = QAction("🧽", self)
         self.eraser_action.setCheckable(True)
         self.eraser_action.setToolTip("Eraser — click any pen stroke, sticky, sketch, or capture box to delete it")
         self.eraser_action.triggered.connect(self.toggle_eraser_mode)
-        toolbar.addAction(self.eraser_action)
-
+        toolbar.addAction(self.eraser_action); pdf(self.eraser_action)
 
         # ── Save-to-PDF toggle ──
         toggle_widget = QWidget()
@@ -360,37 +335,10 @@ class MainWindow(QMainWindow):
         self.save_pdf_switch.toggled.connect(self.toggle_save_pdf_mode)
         toggle_layout.addWidget(toggle_label)
         toggle_layout.addWidget(self.save_pdf_switch)
-        toolbar.addWidget(toggle_widget)
+        pdf(toolbar.addWidget(toggle_widget))
 
-        # ── Pomodoro Timer ──
-        toolbar.addSeparator()
-        pomo_widget = QWidget()
-        pomo_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        pomo_widget.customContextMenuRequested.connect(self._pomo_context_menu)
-        pomo_layout = QHBoxLayout(pomo_widget)
-        pomo_layout.setContentsMargins(4, 0, 4, 0)
-        pomo_layout.setSpacing(4)
-
-        self.pomo_label = QLabel("25:00")
-        self.pomo_label.setToolTip("Timer  |  Right-click for options")
-        self.pomo_label.setStyleSheet("font-weight: bold; font-size: 13px;")
-        pomo_layout.addWidget(self.pomo_label)
-
-        self.pomo_start_btn = QPushButton("▶")
-        self.pomo_start_btn.setFixedSize(26, 26)
-        self.pomo_start_btn.setToolTip("Start / Pause")
-        self.pomo_start_btn.clicked.connect(self.pomo_toggle)
-        pomo_layout.addWidget(self.pomo_start_btn)
-
-        self.pomo_reset_btn = QPushButton("⟲")
-        self.pomo_reset_btn.setFixedSize(26, 26)
-        self.pomo_reset_btn.setToolTip("Reset timer")
-        self.pomo_reset_btn.clicked.connect(self.pomo_reset)
-        pomo_layout.addWidget(self.pomo_reset_btn)
-
-        toolbar.addWidget(pomo_widget)
-
-        # Timer state
+        # ── Pomodoro timer state (controls now live in Tools ▸ Pomodoro;
+        #    the running countdown shows in the status bar) ──
         self._pomo_mode = "pomodoro"      # pomodoro / stopwatch
         self._pomo_focus_min = 25
         self._pomo_break_min = 5
@@ -402,24 +350,27 @@ class MainWindow(QMainWindow):
         self._pomo_timer = QTimer(self)
         self._pomo_timer.setInterval(1000)
         self._pomo_timer.timeout.connect(self._pomo_tick)
+        # Persistent status-bar label for the timer
+        self.pomo_label = QLabel("")
+        self.statusBar().addPermanentWidget(self.pomo_label)
 
-        # Spacer pushes view controls to the right edge
+        # Spacer pushes the theme picker to the right edge
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         toolbar.addWidget(spacer)
 
-        # ── View / tools (right-aligned) ──
+        # ── PDF view toggles (context-gated) + theme (always) ──
         self.continuous_action = QAction("📜", self)
         self.continuous_action.setToolTip("Continuous scroll mode")
         self.continuous_action.setCheckable(True)
         self.continuous_action.triggered.connect(self.toggle_continuous_mode)
-        toolbar.addAction(self.continuous_action)
+        toolbar.addAction(self.continuous_action); pdf(self.continuous_action)
 
         self.night_action = QAction("🌙", self)
         self.night_action.setToolTip("Night mode (invert page colors)")
         self.night_action.setCheckable(True)
         self.night_action.triggered.connect(self.toggle_night_mode)
-        toolbar.addAction(self.night_action)
+        toolbar.addAction(self.night_action); pdf(self.night_action)
 
         self.theme_combo = QComboBox()
         self.theme_combo.addItems(THEMES.keys())
@@ -428,19 +379,8 @@ class MainWindow(QMainWindow):
         self.theme_combo.setToolTip("Theme")
         toolbar.addWidget(self.theme_combo)
 
-        # Overflow menu: less-used tools
-        more_btn = QPushButton("⋯")
-        more_btn.setFlat(True)
-        more_btn.setToolTip("More tools")
-        more_menu = QMenu(self)
-        more_menu.addAction("📸 Screenshot Region", self.start_screenshot_mode)
-        more_menu.addSeparator()
-        more_menu.addAction("🧹 Clear Annotations on This Page", self.clear_page_annotations)
-        more_menu.addAction("🗑 Clear ALL Annotations…", self.clear_all_annotations)
-        more_menu.addSeparator()
-        more_menu.addAction("⚙ Settings…", self.show_settings_dialog)
-        more_btn.setMenu(more_menu)
-        toolbar.addWidget(more_btn)
+        # Build the always-present menu bar (references actions created above)
+        self._build_menu_bar()
 
         # Central Widget -> Tab bar + Splitter
         central = QWidget()
@@ -625,6 +565,110 @@ class MainWindow(QMainWindow):
         splitter.addWidget(right_panel)
         splitter.setSizes([230, 800, 400])
 
+    # ── Menu bar (always present — the stable frame + safety net) ─────────────
+    def _build_menu_bar(self):
+        mb = self.menuBar()
+
+        # File
+        m = mb.addMenu("&File")
+        m.addAction("📂 Open PDF…", self.open_pdf)
+        self.recent_menu_action = m.addAction("📋 Recent Files", self.show_recent_files)
+        m.addSeparator()
+        m.addAction("📝 New Note…", self.new_markdown_note)
+        m.addAction("📖 Open Note…", self.edit_markdown_note)
+        # Web tools — gated by the Study workspace (see _apply_workspace)
+        self._web_menu_actions = [
+            m.addAction("🌐 Study Browser", self.open_web_browser),
+            m.addAction("🎬 YouTube Player", self.open_youtube_player),
+        ]
+        m.addSeparator()
+        m.addAction("📄 Import PDF Annotations from .md…", self.load_markdown)
+        m.addSeparator()
+        m.addAction("💾 Save Annotations", self.export_markdown)
+        m.addAction("🖨 Export Notes as PDF…", self.export_pdf)
+        m.addAction("🃏 Export Anki Flashcards…", self.export_anki)
+        m.addSeparator()
+        m.addAction("Quit", self.close)
+
+        # Edit
+        e = mb.addMenu("&Edit")
+        e.addAction("🔍 Find in PDF…", self.show_search)
+        e.addSeparator()
+        e.addAction("🧹 Clear Annotations on This Page", self.clear_page_annotations)
+        e.addAction("🗑 Clear ALL Annotations…", self.clear_all_annotations)
+
+        # View — reuses the same checkable actions as the toolbar (one source of
+        # truth), so toggling in either place stays in sync.
+        v = mb.addMenu("&View")
+        self.vault_toggle_action.setText("🗂 Notes Sidebar")
+        v.addAction(self.vault_toggle_action)
+        self.show_toolbar_action = v.addAction("Show Toolbar")
+        self.show_toolbar_action.setCheckable(True)
+        self.show_toolbar_action.setChecked(True)
+        self.show_toolbar_action.toggled.connect(self.toggle_toolbar)
+        v.addSeparator()
+        self.continuous_action.setText("📜 Continuous Scroll")
+        v.addAction(self.continuous_action)
+        self.night_action.setText("🌙 Night Mode")
+        v.addAction(self.night_action)
+
+        # Tools
+        t = mb.addMenu("&Tools")
+        t.addAction("📸 Screenshot Region", self.start_screenshot_mode)
+        t.addSeparator()
+        pomo = t.addMenu("⏱ Pomodoro")
+        self.pomo_action = pomo.addAction("▶ Start / Pause", self.pomo_toggle)
+        pomo.addAction("⟲ Reset", self.pomo_reset)
+        pomo.addSeparator()
+        pomo.addAction("Switch Pomodoro / Stopwatch", self._pomo_toggle_mode)
+        pomo.addAction("Set Focus Time…", self._pomo_set_focus)
+        pomo.addAction("Set Break Time…", self._pomo_set_break)
+        pomo.addAction("Set Long Break Time…", self._pomo_set_long_break)
+        t.addSeparator()
+        t.addAction("⚙ Set Vault Folder…", self.set_vault)
+        ws = t.addMenu("🧭 Workspace")
+        self.ws_light_action = ws.addAction(
+            "📚 Annotator + Notes", lambda: self.set_workspace("light"))
+        self.ws_study_action = ws.addAction(
+            "🌐 Study (adds web tools)", lambda: self.set_workspace("study"))
+        for a in (self.ws_light_action, self.ws_study_action):
+            a.setCheckable(True)
+        t.addSeparator()
+        t.addAction("⚙ Preferences…", self.show_settings_dialog)
+
+        # Help
+        h = mb.addMenu("&Help")
+        h.addAction("⌨ Keyboard Shortcuts", self.show_cheatsheet)
+        h.addAction("About", self.show_about)
+
+    def _sync_toolbar_context(self):
+        """Show the PDF-only tools only when the PDF canvas is active."""
+        on_pdf = self.center_stack.currentWidget() is self.scroll_area
+        for a in self._pdf_tool_actions:
+            a.setVisible(on_pdf)
+
+    def toggle_toolbar(self, checked):
+        self.toolbar.setVisible(checked)
+
+    def show_about(self):
+        QMessageBox.about(
+            self, "About PDF Annotator for Obsidian",
+            "PDF Annotator for Obsidian\n\n"
+            "Annotate PDFs (highlights, pen, sketches, stickies) and export to "
+            "your Obsidian vault as Markdown, with an Obsidian-style note "
+            "editor and — in the Study workspace — a web browser and YouTube "
+            "player.\n\nPress ⌨ Help ▸ Keyboard Shortcuts for the cheatsheet.")
+
+    def _pomo_toggle_mode(self):
+        if self._pomo_mode == "pomodoro":
+            self._pomo_switch_stopwatch()
+        else:
+            self._pomo_switch_pomodoro()
+
+    def _pomo_set_running_ui(self, running):
+        if hasattr(self, "pomo_action"):
+            self.pomo_action.setText("⏸ Pause" if running else "▶ Start / Pause")
+
     def setup_shortcuts(self):
         if hasattr(self, 'active_shortcuts'):
             for s in self.active_shortcuts:
@@ -652,6 +696,7 @@ class MainWindow(QMainWindow):
         sc(self.shortcuts.get("next_page"), self.next_page)
         sc(self.shortcuts.get("cheatsheet"), self.show_cheatsheet)
         sc(self.shortcuts.get("screenshot"), self.start_screenshot_mode)
+        sc(self.shortcuts.get("eraser"), self.eraser_action.trigger)
         sc("Ctrl+W", self.close_center_tab)  # close current note/browser tab
 
     # ── Settings ─────────────────────────────────────────────────────────────
@@ -746,66 +791,68 @@ class MainWindow(QMainWindow):
         if self._pomo_running:
             self._pomo_timer.stop()
             self._pomo_running = False
-            self.pomo_start_btn.setText("▶")
+            self._pomo_set_running_ui(False)
         else:
             self._pomo_timer.start()
             self._pomo_running = True
-            self.pomo_start_btn.setText("⏸")
+            self._pomo_set_running_ui(True)
+            self._pomo_refresh_label()
+
+    def _pomo_refresh_label(self):
+        s = self._pomo_seconds
+        hrs, rem = divmod(s, 3600)
+        mins, secs = divmod(rem, 60)
+        txt = f"{hrs}:{mins:02d}:{secs:02d}" if hrs else f"{mins:02d}:{secs:02d}"
+        self.pomo_label.setText(f"  ⏱ {txt}  ")
 
     def pomo_reset(self):
         self._pomo_timer.stop()
         self._pomo_running = False
-        self.pomo_start_btn.setText("▶")
-        self.pomo_label.setStyleSheet("font-weight: bold; font-size: 13px;")
+        self._pomo_set_running_ui(False)
+        self.pomo_label.setStyleSheet("")
         if self._pomo_mode == "stopwatch":
             self._pomo_seconds = 0
-            self.pomo_label.setText("00:00")
         else:
             self._pomo_phase = "focus"
             self._pomo_seconds = self._pomo_focus_min * 60
             self._pomo_count = 0
-            self.pomo_label.setText(f"{self._pomo_focus_min:02d}:00")
+        self._pomo_refresh_label()
 
     def _pomo_tick(self):
         if self._pomo_mode == "stopwatch":
             self._pomo_seconds += 1
-            hrs, rem = divmod(self._pomo_seconds, 3600)
-            mins, secs = divmod(rem, 60)
-            if hrs > 0:
-                self.pomo_label.setText(f"{hrs}:{mins:02d}:{secs:02d}")
-            else:
-                self.pomo_label.setText(f"{mins:02d}:{secs:02d}")
+            self._pomo_refresh_label()
             return
 
         # Pomodoro countdown
         self._pomo_seconds -= 1
-        mins, secs = divmod(self._pomo_seconds, 60)
-        self.pomo_label.setText(f"{mins:02d}:{secs:02d}")
+        self._pomo_refresh_label()
 
         if self._pomo_seconds <= 0:
             self._pomo_timer.stop()
             self._pomo_running = False
-            self.pomo_start_btn.setText("▶")
+            self._pomo_set_running_ui(False)
             if self._pomo_phase == "focus":
                 self._pomo_count += 1
                 if self._pomo_count % 4 == 0:
                     self._pomo_phase = "long_break"
                     self._pomo_seconds = self._pomo_long_break_min * 60
-                    self.pomo_label.setText(f"{self._pomo_long_break_min:02d}:00")
-                    self.pomo_label.setStyleSheet("font-weight: bold; font-size: 13px; color: #e0af68;")
-                    QMessageBox.information(self, "Pomodoro", f"{self._pomo_count} pomodoros done!\nLong break ({self._pomo_long_break_min} min).")
+                    self.pomo_label.setStyleSheet("color: #e0af68;")
+                    self.statusBar().showMessage(
+                        f"⏱ {self._pomo_count} pomodoros done — long break "
+                        f"({self._pomo_long_break_min} min). Press Tools ▸ Pomodoro ▸ Start.", 8000)
                 else:
                     self._pomo_phase = "break"
                     self._pomo_seconds = self._pomo_break_min * 60
-                    self.pomo_label.setText(f"{self._pomo_break_min:02d}:00")
-                    self.pomo_label.setStyleSheet("font-weight: bold; font-size: 13px; color: #9ece6a;")
-                    QMessageBox.information(self, "Pomodoro", f"Focus done! Break ({self._pomo_break_min} min).")
+                    self.pomo_label.setStyleSheet("color: #9ece6a;")
+                    self.statusBar().showMessage(
+                        f"⏱ Focus done — break ({self._pomo_break_min} min).", 8000)
             else:
                 self._pomo_phase = "focus"
                 self._pomo_seconds = self._pomo_focus_min * 60
-                self.pomo_label.setText(f"{self._pomo_focus_min:02d}:00")
-                self.pomo_label.setStyleSheet("font-weight: bold; font-size: 13px;")
-                QMessageBox.information(self, "Pomodoro", "Break over! Ready to focus.")
+                self.pomo_label.setStyleSheet("")
+                self.statusBar().showMessage("⏱ Break over — ready to focus.", 8000)
+            self._pomo_refresh_label()
 
     def _pomo_context_menu(self, pos):
         menu = QMenu(self)
@@ -1038,7 +1085,7 @@ class MainWindow(QMainWindow):
             
             menu.addAction(action)
 
-        menu.exec(self.recent_btn.mapToGlobal(QPoint(0, self.recent_btn.height())))
+        menu.exec(QCursor.pos())
 
     # ── Bookmark ─────────────────────────────────────────────────────────────
     def save_bookmark(self):
@@ -2560,7 +2607,7 @@ class MainWindow(QMainWindow):
     # ── Settings Dialog ──────────────────────────────────────────────────────
     def show_settings_dialog(self):
         dlg = QDialog(self)
-        dlg.setWindowTitle("⚙ Settings")
+        dlg.setWindowTitle("⚙ Preferences")
         layout = QGridLayout(dlg)
         row = 0
 
@@ -2588,10 +2635,6 @@ class MainWindow(QMainWindow):
         box_cb.setChecked(self.screenshot_box)
         layout.addWidget(box_cb, row, 0, 1, 2); row += 1
 
-        cont_cb = QCheckBox("Continuous scroll mode")
-        cont_cb.setChecked(self.continuous_mode)
-        layout.addWidget(cont_cb, row, 0, 1, 2); row += 1
-
         sketch_cb = QCheckBox("New sketch stickies start collapsed (as an icon)")
         sketch_cb.setChecked(self.sketch_default_collapsed)
         layout.addWidget(sketch_cb, row, 0, 1, 2); row += 1
@@ -2611,11 +2654,8 @@ class MainWindow(QMainWindow):
                 self.role_colors[role] = combo.currentText()
             self.screenshot_box = box_cb.isChecked()
             self.sketch_default_collapsed = sketch_cb.isChecked()
-            if cont_cb.isChecked() != self.continuous_mode:
-                self.continuous_action.setChecked(cont_cb.isChecked())
-                self.toggle_continuous_mode(cont_cb.isChecked())
             self.save_settings()
-            self.statusBar().showMessage("Settings saved.", 2000)
+            self.statusBar().showMessage("Preferences saved.", 2000)
 
     # ── Document Tabs ────────────────────────────────────────────────────────
     def _save_current_session(self):
@@ -2822,10 +2862,12 @@ class MainWindow(QMainWindow):
     def show_pdf_center(self):
         self.center_stack.setCurrentWidget(self.scroll_area)
         self.refresh_side_panels()
+        self._sync_toolbar_context()
 
     def show_notes_center(self):
         self.center_stack.setCurrentWidget(self.notes_tabs)
         self.refresh_side_panels()
+        self._sync_toolbar_context()
 
     def current_note_source(self):
         """The widget whose .editor holds the active markdown (a note tab or a
@@ -3031,14 +3073,6 @@ class MainWindow(QMainWindow):
             return "🖼"
         return None
 
-    @classmethod
-    def _dir_has_content(cls, path):
-        for _root, _dirs, files in os.walk(path):
-            for f in files:
-                if cls._is_note(f) or cls._media_icon(f):
-                    return True
-        return False
-
     def refresh_vault_tree(self):
         if not hasattr(self, "vault_tree"):
             return
@@ -3062,7 +3096,9 @@ class MainWindow(QMainWindow):
             for e in entries:
                 full = os.path.join(dirpath, e)
                 if os.path.isdir(full):
-                    if e.startswith(".") or not self._dir_has_content(full):
+                    # Show every real folder (mirror the filesystem); only hide
+                    # dotfolders and, inside a vault, the attachments/ folder.
+                    if e.startswith("."):
                         continue
                     if e == "attachments" and not show_attachments:
                         continue
