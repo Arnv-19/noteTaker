@@ -95,6 +95,8 @@ class MainWindow(QMainWindow):
         self.vault_path = ""
         self.notes_root = ""  # sidebar folder — any folder, vault optional
         self.workspace = ""   # "" until chosen; "light" (no web) or "study" (web tools)
+        self.focus_filter_on = False  # in-app distraction/adult blocklist
+        self._web_profile = None      # shared persistent WebEngine profile
         self.night_mode = False
         self.save_to_pdf_mode = True
         self.theme_name = "AMOLED"
@@ -623,6 +625,11 @@ class MainWindow(QMainWindow):
         v.addAction(self.continuous_action)
         self.night_action.setText("🌙 Night Mode")
         v.addAction(self.night_action)
+        v.addSeparator()
+        self.focus_filter_action = v.addAction("🛡 Focus Filter (block distracting sites)")
+        self.focus_filter_action.setCheckable(True)
+        self.focus_filter_action.setChecked(self.focus_filter_on)
+        self.focus_filter_action.toggled.connect(self.toggle_focus_filter)
 
         # Tools
         t = mb.addMenu("&Tools")
@@ -723,6 +730,7 @@ class MainWindow(QMainWindow):
                 self.vault_path = data.get("vault_path", "")
                 self.notes_root = data.get("notes_root", "")
                 self.workspace = data.get("workspace", "")
+                self.focus_filter_on = data.get("focus_filter", False)
                 self.recent_files = data.get("recent_files", [])
                 self.bookmarks = data.get("bookmarks", {})
                 self.theme_name = data.get("theme", "AMOLED")
@@ -751,6 +759,7 @@ class MainWindow(QMainWindow):
                 self.shortcuts.update(data.get("shortcuts", {}))
                 self.night_action.setChecked(self.night_mode)
                 self.save_pdf_switch.setChecked(self.save_to_pdf_mode)
+                self.focus_filter_action.setChecked(self.focus_filter_on)
                 self.theme_combo.setCurrentText(self.theme_name)
                 apply_theme(QApplication.instance(), self.theme_name)
                 # Show the notes sidebar if it was open last time
@@ -781,6 +790,7 @@ class MainWindow(QMainWindow):
             "vault_sidebar": self.vault_panel.isVisible() if hasattr(self, "vault_panel") else False,
             "notes_root": self.notes_root,
             "workspace": self.workspace,
+            "focus_filter": self.focus_filter_on,
         }
         with open(self.SETTINGS_FILE, "w") as f:
             json.dump(data, f, indent=2)
@@ -3008,6 +3018,41 @@ class MainWindow(QMainWindow):
         page.url_bar.setFocus()
         return page
 
+    def _get_web_profile(self):
+        """One shared, persistent WebEngine profile for all web views: a real
+        Chrome user-agent + persistent cookies (so logins stick and sites stop
+        flagging us as a bot / showing endless CAPTCHAs), plus the focus-filter
+        request interceptor."""
+        if self._web_profile is None:
+            from PyQt6.QtWebEngineCore import QWebEngineProfile
+            prof = QWebEngineProfile("studybrowser", self)  # named ⇒ on-disk
+            prof.setHttpUserAgent(CHROME_UA)
+            prof.setPersistentCookiesPolicy(
+                QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies)
+            self._focus_interceptor = _make_focus_interceptor(self)
+            prof.setUrlRequestInterceptor(self._focus_interceptor)
+            self._web_profile = prof
+        return self._web_profile
+
+    def _make_web_view(self):
+        """A QWebEngineView on the shared profile with the standard settings."""
+        from PyQt6.QtWebEngineWidgets import QWebEngineView
+        from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
+        view = QWebEngineView()
+        view.setPage(QWebEnginePage(self._get_web_profile(), view))
+        ws = view.settings()
+        ws.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
+        ws.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
+        ws.setAttribute(QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, False)
+        return view
+
+    def toggle_focus_filter(self, on):
+        self.focus_filter_on = bool(on)
+        self.save_settings()
+        self.statusBar().showMessage(
+            "🛡 Focus filter ON — distracting/adult sites blocked in-app."
+            if on else "Focus filter off.", 4000)
+
     def _update_youtube_tab(self, widget, text):
         idx = self.notes_tabs.indexOf(widget)
         if idx >= 0:
@@ -3719,6 +3764,42 @@ class MediaPlayerDialog(QDialog):
         e.accept()
 
 
+# A normal desktop-Chrome user agent. Qt's default UA advertises
+# "QtWebEngine", which Google/Cloudflare flag as a bot → constant CAPTCHAs.
+CHROME_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+             "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
+
+# Light "focus filter" seed list (adult + high-distraction domains). This
+# approximates the spirit of Cloudflare Family DNS, but real device-wide
+# filtering belongs at the OS/router DNS level (set 1.1.1.3 / 1.0.0.3). Extend
+# this list freely.
+FOCUS_BLOCKLIST = {
+    "pornhub.com", "xvideos.com", "xnxx.com", "redtube.com", "xhamster.com",
+    "youporn.com", "onlyfans.com",
+    "facebook.com", "instagram.com", "tiktok.com", "twitter.com", "x.com",
+    "reddit.com", "9gag.com",
+}
+
+
+def _host_blocked(host):
+    host = (host or "").lower()
+    return any(host == d or host.endswith("." + d) for d in FOCUS_BLOCKLIST)
+
+
+def _make_focus_interceptor(owner):
+    """A request interceptor that blocks blocklisted hosts while the owner's
+    focus filter is on. Built lazily so QtWebEngineCore stays a lazy import."""
+    from PyQt6.QtWebEngineCore import QWebEngineUrlRequestInterceptor
+
+    class _FocusInterceptor(QWebEngineUrlRequestInterceptor):
+        def interceptRequest(self, info):
+            if getattr(owner, "focus_filter_on", False) \
+                    and _host_blocked(info.requestUrl().host()):
+                info.block(True)
+
+    return _FocusInterceptor(owner)
+
+
 def parse_youtube(url):
     """Extract (video_id, playlist_id) from any YouTube URL form. Either may be
     None. Handles watch?v=, youtu.be/, /embed/, /shorts/, and list= playlists."""
@@ -3734,6 +3815,21 @@ def parse_youtube(url):
     if m:
         plist = m.group(1)
     return vid, plist
+
+
+def _url_or_search(text):
+    """Turn an address-bar entry into a URL: keep explicit schemes, prefix a
+    dotted host with https://, otherwise Google-search it. Returns None if
+    blank."""
+    text = text.strip()
+    if not text:
+        return None
+    if re.match(r"^[a-zA-Z][\w+.-]*://", text):
+        return text
+    if " " not in text and re.search(r"\.[a-zA-Z]{2,}", text):
+        return "https://" + text
+    from urllib.parse import quote_plus
+    return "https://www.google.com/search?q=" + quote_plus(text)
 
 
 def youtube_embed_url(vid, plist):
@@ -3788,11 +3884,7 @@ class YouTubePlayerWidget(QWidget):
             "Close this tab (Ctrl+W)")
         root.addWidget(bar)
 
-        self.web = QWebEngineView()
-        ws = self.web.settings()
-        ws.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
-        ws.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
-        ws.setAttribute(QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, False)
+        self.web = owner._make_web_view()  # shared profile (Chrome UA, cookies)
 
         self.split = QSplitter(Qt.Orientation.Horizontal)
         self.split.addWidget(self.web)
@@ -3936,17 +4028,16 @@ class WebBrowserWidget(QWidget):
             "no copy-paste needed")
         bar.addAction("📸 Clip", self.screenshot_to_note).setToolTip(
             "Screenshot this page into the side note")
+        bar.addAction("⊞ Split", self.toggle_split_pane).setToolTip(
+            "Open a second web pane beside this one (e.g. an AI chat)")
         bar.addAction("🔗 Open externally", self.open_in_system_browser).setToolTip(
             "Open the current page in your normal browser")
         bar.addAction("✖ Close", lambda: self.owner.close_center_tab(self)).setToolTip(
             "Close this browser tab (Ctrl+W)")
         root.addWidget(bar)
 
-        self.web = QWebEngineView()
-        ws = self.web.settings()
-        ws.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
-        ws.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
-        ws.setAttribute(QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, False)
+        # Main web view on the shared profile (Chrome UA + persistent cookies)
+        self.web = owner._make_web_view()
         self.web.urlChanged.connect(
             lambda u: self.url_bar.setText(u.toString()))
         self.web.titleChanged.connect(self._on_title)
@@ -3956,17 +4047,54 @@ class WebBrowserWidget(QWidget):
         # Catch Ctrl+N over the page to capture the selection in one step
         self.web.loadFinished.connect(self._arm_key_capture)
 
-        # Side-by-side: page on the left, your note on the right
+        # Layout: [ main web | second web pane (optional) | note (optional) ]
         self.split = QSplitter(Qt.Orientation.Horizontal)
         self.split.addWidget(self.web)
+        self.second_pane = self._build_second_pane(owner)
+        self.split.addWidget(self.second_pane)
         self.side_note = SideNoteWidget(owner)
         self.split.addWidget(self.side_note)
-        self.split.setSizes([660, 360])
-        self.side_note.hide()  # appears on first capture or via 📝 Note pane
+        self.split.setSizes([660, 0, 360])
+        self.second_pane.hide()  # appears via ⊞ Split
+        self.side_note.hide()    # appears on first capture or via 📝 Note pane
         root.addWidget(self.split, 1)
 
         if start_url:
             self.web.setUrl(QUrl(start_url))
+
+    def _build_second_pane(self, owner):
+        pane = QWidget()
+        lay = QVBoxLayout(pane)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        sub = QToolBar()
+        self.url_bar2 = QLineEdit()
+        self.url_bar2.setPlaceholderText("Search or type a URL (e.g. an AI chat)…")
+        self.url_bar2.returnPressed.connect(self.navigate2)
+        sub.addWidget(self.url_bar2)
+        sub.addAction("▶", self.navigate2).setToolTip("Go")
+        lay.addWidget(sub)
+        self.web2 = owner._make_web_view()
+        self.web2.urlChanged.connect(lambda u: self.url_bar2.setText(u.toString()))
+        self.web2.page().newWindowRequested.connect(self._on_new_window)
+        lay.addWidget(self.web2, 1)
+        return pane
+
+    def toggle_split_pane(self):
+        if self.second_pane.isHidden():
+            self.second_pane.show()
+            sizes = self.split.sizes()
+            self.split.setSizes([sizes[0] or 500, 460, sizes[2]])
+            if not self.web2.url().toString() or self.web2.url().toString() == "about:blank":
+                self.web2.setUrl(QUrl("https://www.google.com"))
+            self.url_bar2.setFocus()
+        else:
+            self.second_pane.hide()
+
+    def navigate2(self):
+        url = _url_or_search(self.url_bar2.text())
+        if url:
+            self.web2.setUrl(QUrl(url))
 
     def toggle_side_note(self):
         self.side_note.setVisible(self.side_note.isHidden())
@@ -4016,18 +4144,9 @@ class WebBrowserWidget(QWidget):
         self.owner._update_browser_tab(self, (title or "Web")[:22])
 
     def navigate(self):
-        text = self.url_bar.text().strip()
-        if not text:
-            return
-        # Looks like a URL? (has scheme, or a dotted host with no spaces)
-        if re.match(r"^[a-zA-Z][\w+.-]*://", text):
-            url = text
-        elif " " not in text and re.search(r"\.[a-zA-Z]{2,}", text):
-            url = "https://" + text
-        else:
-            from urllib.parse import quote_plus
-            url = "https://www.google.com/search?q=" + quote_plus(text)
-        self.web.setUrl(QUrl(url))
+        url = _url_or_search(self.url_bar.text())
+        if url:
+            self.web.setUrl(QUrl(url))
 
     def open_in_system_browser(self):
         from PyQt6.QtGui import QDesktopServices
@@ -4066,6 +4185,8 @@ class WebBrowserWidget(QWidget):
         if not self.side_note.maybe_discard():
             return False  # user cancelled — keep the tab
         self.web.setUrl(QUrl("about:blank"))  # stop media/network
+        if hasattr(self, "web2"):
+            self.web2.setUrl(QUrl("about:blank"))
         return True
 
 
